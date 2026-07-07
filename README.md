@@ -1,6 +1,6 @@
 **Closure**
 
-Work in progress on research and development of clourse models for fast reactions in turbulent liquids.
+Work in progress on research and development of closure models for fast reactions in turbulent liquids, especially expressions for C(f).
 
 Not ready to be used yet, will make this pip installable when it's ready, probably Q4 2026.
 
