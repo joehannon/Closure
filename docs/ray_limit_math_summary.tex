@@ -1,0 +1,230 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage{xcolor}
+
+\newcommand{\reac}{\mathrm{reac}}
+\newcommand{\prodsup}{\mathrm{prod}}
+\newcommand{\fs}{f_s^{\star}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\DeclarePairedDelimiter{\avg}{\langle}{\rangle}
+
+\setlength{\parskip}{0.55em}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-1.5em}\textbf{\large \texttt{ray\_limit}: selectivity ray,
+complete-reaction limit, and closure profile \(C(f)\)}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-3.5em}
+\begin{center}
+\textcolor{gray!70!black}{\small Mixing-limited reaction closure \quad---\quad
+\code{species\_limits.py}, \code{integrate\_species\_odes}}
+\end{center}
+\vspace{0.4em}
+
+\section*{Setup}
+
+Active species \(i\in\mathcal{A}\), reactions \(j=1,\dots,R\). Net stoichiometry matrix
+\[
+N\in\mathbb{R}^{|\mathcal{A}|\times R},\qquad
+N_{ij}=\nu^{\prodsup}_{ij}-\nu^{\reac}_{ij}.
+\]
+Feed vectors \(Y^{(1)},Y^{(2)}\in\mathbb{R}^{|\mathcal{A}|}\) (stream~1 at \(f=1\),
+stream~2 at \(f=0\)). The \textbf{no-reaction line} at mixture fraction \(f\in[0,1]\) is
+\[
+M_i(f)=f\,Y^{(1)}_i+(1-f)\,Y^{(2)}_i.
+\]
+Let \(y\) be the current ODE state, \(y^0\) its initial value, and \(\avg{\cdot}\) the
+expectation under the step's \(\mathrm{Beta}(\alpha_t,\beta_t)\) pdf.
+
+\section*{1.\quad Selectivity ray}
+
+The accumulated change \(\Delta:=y-y^0\) lies in \(\operatorname{range}(N)\). The
+\textbf{selectivity ray} is taken directly as this accumulated extent:
+\[
+d = \Delta = y - y^0.
+\]
+This preserves the true reaction direction without distortion from a nonnegativity clip
+--- important when products form by more than one route (parallel reactions,
+intermediates). Near \(y^0\) (where \(\Delta\approx 0\) and the direction is
+ill-conditioned) the code falls back to the mass-action projection
+\(d = N\,r(y)\), where \(r(y)\) is the vector of instantaneous mass-action rates.
+
+The ray \(d\) encodes the \textbf{current selectivity}: which species have been consumed
+or produced and in what ratio. It rotates as the ODE state evolves, tracking the shift
+between competing pathways.
+
+\section*{2.\quad The complete-reaction limit \(B(f)\)}
+
+\(B_i(f)\) is built by reacting the mixing line \(M(f)\) to completion along the ray \(d\)
+--- advancing as far as possible without any species going negative.
+
+\textbf{Maximum extent.} At each \(f\) the largest non-negative scalar \(c_{\max}(f)\)
+that keeps \(M(f)+c\,d\ge 0\) is
+\[
+c_{\max}(f) = \min_{\substack{i:\,d_i<0}}\frac{M_i(f)}{-d_i}.
+\]
+Only consumed species (\(d_i<0\)) constrain \(c_{\max}\); products (\(d_i>0\)) are
+unconstrained. The limit is then
+\[
+B_i(f) = M_i(f) + c_{\max}(f)\,d_i.
+\]
+
+\section*{3.\quad Closure profile \(C_i(f)\) and scalar \(\lambda\)}
+
+The closure profile interpolates between the complete-reaction limit \(B_i\) and the
+no-reaction line \(M_i\):
+\[
+\boxed{\;C_i(f)=B_i(f)+\bigl[M_i(f)-B_i(f)\bigr]\,\lambda_i\;}
+\]
+\(\lambda_i=0\) gives the pure complete-reaction limit; \(\lambda_i=1\) gives pure
+no-reaction mixing. \(\lambda_i\) is set so that \(\avg{C_i}=y_i\):
+\[
+\lambda_i=\operatorname{clip}_{[0,1]}\frac{y_i-\avg{B_i}}{\avg{M_i}-\avg{B_i}}.
+\]
+Segment integrals use the regularised incomplete Beta function \(I_x(\alpha,\beta)\)
+(\code{betainc}):
+\[
+\int_{f_a}^{f_b}(sf+b)\,p_\beta\,df
+= s\,\frac{\alpha_t}{\alpha_t+\beta_t}
+  \bigl[I_{f_b}(\alpha_t{+}1,\beta_t)-I_{f_a}(\alpha_t{+}1,\beta_t)\bigr]
++ b\,\bigl[I_{f_b}(\alpha_t,\beta_t)-I_{f_a}(\alpha_t,\beta_t)\bigr].
+\]
+
+\textbf{Global \(\lambda\) for pure cross-stream.} Since \(M_i\) is linear,
+\(\avg{M_i}=M_i(\bar{f})=y^0_i\), and \(B_i-M_i=c_{\max}\,d_i\) by construction, so
+\[
+\lambda_i = \frac{y_i-\avg{B_i}}{y^0_i-\avg{B_i}}
+= \frac{d_i(1-\avg{c_{\max}})}{-\avg{c_{\max}}\,d_i}
+= 1-\frac{1}{\avg{c_{\max}}}
+\]
+--- \textbf{the same scalar for every species} --- and \(\avg{C_i}=y_i\) exactly (no
+clamp needed). Per-species \(\lambda_i\) diverge from this only when the clamp \([0,1]\)
+binds.
+
+\section*{4.\quad Worked illustration: \texttt{input\_fuller\_BC\_azo\_coupling\_kinetics}}
+
+\textbf{Scheme:} R1: \(A{+}B\!\to\!R\), R2: \(A{+}R\!\to\!S\), R3: \(A{+}B\!\to\!T\),
+R4: \(A{+}T\!\to\!S\), R5: \(A{+}C\!\to\!Q\).
+\textbf{Feeds:} \(Y^{(1)}=15\,A\) (stream~1), \(Y^{(2)}=1.2\,B+1.2\,C\) (stream~2);
+\(f_{\mathrm{mean}}=0.0625\).
+
+\textbf{The effective single reaction.} The selectivity ray \(d=\Delta\) records the net
+moles of each species consumed or produced per unit of accumulated reaction progress. Its
+components \(d_i\) are the net stoichiometric coefficients of a single \emph{effective
+lumped reaction} that encodes the current mixture of all five pathways:
+\[
+|d_A|\,A + |d_B|\,B + |d_C|\,C
+\;\longrightarrow\;
+d_R\,R + d_S\,S + d_Q\,Q
+\]
+(species with \(d_i\approx 0\), here \(T\), are in steady-state balance and do not appear
+explicitly). The coefficients rotate as the ODE state evolves: the table gives them at the
+half-way step ($\approx 50\%$ \(A\) conversion) for three dissipation rates \(\varepsilon\).
+At low \(\varepsilon\) (broad pdf, persistent \(A\)-rich pockets) the secondary pathways
+dominate and \(S\) carries most of the product weight; at high \(\varepsilon\) (near-uniform,
+\(A\)-lean) the primary reactions dominate and \(R\) and \(Q\) accumulate.
+
+\begin{center}\small
+\begin{tabular}{l|ccc}
+\toprule
+ & \(\varepsilon=10^{-6}\) & \(\varepsilon=1\) & \(\varepsilon=10^{6}\)\\\midrule
+\((\alpha_t,\beta_t)\) & \((0.288,\,4.32)\) & \((0.379,\,5.68)\) & \((17.7,\,265)\)\\
+kink \(\fs\)           & \(0.193\)          & \(0.135\)          & \(0.078\)\\
+\(\lambda\) (global)   & \(0.000^{\dagger}\)& \(0.001\)          & \(0.054\)\\\midrule
+\(d_A\) & \(-0.706\) & \(-0.655\) & \(-0.868\)\\
+\(d_B\) & \(-0.237\) & \(-0.337\) & \(-0.819\)\\
+\(d_C\) & \(-0.237\) & \(-0.291\) & \(-0.048\)\\
+\(d_R\) & \(+0.004\) & \(+0.309\) & \(+0.818\)\\
+\(d_S\) & \(+0.233\) & \(+0.027\) & \(+0.001\)\\
+\(d_Q\) & \(+0.237\) & \(+0.291\) & \(+0.048\)\\
+\bottomrule
+\end{tabular}
+\end{center}
+{\small \(^{\dagger}\)At \(\varepsilon=10^{-6}\) the mean has reached the complete-reaction
+average (\(y_i\ge\avg{B_i}\)), so \(\lambda\) clamps at \(0\) and
+\(\avg{C_i}=\avg{B_i}\).}
+
+\textbf{Building the limit (\(\varepsilon=1\)).} The effective reaction at this step is
+\[
+0.655\,A + 0.337\,B + 0.291\,C \;\longrightarrow\; 0.309\,R + 0.027\,S + 0.291\,Q.
+\]
+The complete-reaction limit \(B(f)\) is found by advancing the mixing line \(M(f)\)
+along this reaction as far as possible without a reactant going negative.  The maximum
+extent \(c_{\max}(f)\) is set by whichever reactant is first exhausted:
+\[
+c_{\max}(f) = \min\!\left(\frac{M_A(f)}{0.655},\;\frac{M_B(f)}{0.337},\;\frac{M_C(f)}{0.291}\right)
+= \min\!\left(\frac{15f}{0.655},\;\frac{1.2(1-f)}{0.337},\;\frac{1.2(1-f)}{0.291}\right).
+\]
+Since \(1.2(1{-}f)/0.337 < 1.2(1{-}f)/0.291\) for all \(f\), the binding constraints are
+\(A\) and \(B\). Using \(p_i=M_i(0)/|d_i|\), \(q_i=(M_i(1)-M_i(0))/|d_i|\):
+\[
+(p,q)_A=(0,\,22.89),\quad (p,q)_B=(3.565,\,-3.565),\quad (p,q)_C=(4.119,\,-4.119).
+\]
+The \(A\)- and \(B\)-lines cross at the kink: \(\fs=3.565/26.46=0.135\),
+\(c^{\star}=3.083\). The peak values \(v^{\mathrm{fs}}_i=M_i(\fs)+c^{\star}d_i\) (e.g.\
+\(v^{\mathrm{fs}}_R=0+3.083\times0.309=0.953\)) complete \(B_i\); their Beta-averages
+give \(\avg{B_i}\), and \(C_i=B_i+(M_i-B_i)\lambda\) with \(\lambda=0.001\):
+
+\begin{center}\small
+\begin{tabular}{c|cccccc}
+\toprule
+\(\varepsilon=1\) & \(\avg{M_i}=y^0_i\) & \(v^{\mathrm{fs}}_i\) (mol\,m\(^{-3}\)) &
+\(\avg{B_i}\) (mol\,m\(^{-3}\)) & \(y_i\) (mol\,m\(^{-3}\)) & \(\lambda_i\) &
+\(\avg{C_i}\) \\\midrule
+\(A\) & 0.9375 & 0.000 & 0.282 & 0.282 & 0.001 & 0.282 \\
+\(B\) & 1.1250 & 0.000 & 0.788 & 0.788 & 0.001 & 0.788 \\
+\(C\) & 1.1250 & 0.140 & 0.833 & 0.834 & 0.001 & 0.834 \\
+\(R\) & 0.0000 & 0.954 & 0.310 & 0.309 & 0.001 & 0.309 \\
+\(S\) & 0.0000 & 0.084 & 0.027 & 0.027 & 0.001 & 0.027 \\
+\(Q\) & 0.0000 & 0.899 & 0.292 & 0.291 & 0.001 & 0.291 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Every \(\lambda_i\) equals the global scalar and \(\avg{C_i}=y_i\) to the quoted digits.
+
+\section*{Note: single interior kink}
+
+\textbf{Single interior kink.} For a pure cross-stream scheme the consumed species are
+absent from their respective feed endpoints, so \(c_{\max}=0\) at \(f=0\) and \(f=1\).
+Between the endpoints \(c_{\max}(f)\) is piecewise linear and concave; its kink \(\fs\)
+is where the two tightest consumed-species constraints are simultaneously binding:
+\[
+\fs = \frac{p_b - p_a}{q_a - q_b},
+\qquad p_i = \frac{M_i(0)}{-d_i},\quad q_i = \frac{M_i(1)-M_i(0)}{-d_i}.
+\]
+The peak extent at the kink is \(c^{\star}=c_{\max}(\fs)\). This gives the
+\textbf{two-segment tent}:
+\[
+B_i(f) = \begin{cases}
+M_i(f) + \dfrac{f}{\fs}\,c^{\star}\,d_i & f \le \fs\\[8pt]
+M_i(f) + \dfrac{1-f}{1-\fs}\,c^{\star}\,d_i & f > \fs
+\end{cases}
+\]
+with control-point peak value \(v^{\mathrm{fs}}_i = M_i(\fs)+c^{\star}d_i\) and
+pure-feed endpoints \(B_i(0)=Y^{(2)}_i\), \(B_i(1)=Y^{(1)}_i\).
+
+This structure holds when every species with \(d_i<0\) satisfies \(Y^{(1)}_i=0\) or
+\(Y^{(2)}_i=0\).
+
+\textbf{Intermediates are safe.} A species absent from both feeds has \(y^0_i=0\), and
+since concentrations are non-negative, \(d_i=y_i-y^0_i=y_i\ge 0\). So an intermediate
+can never have \(d_i<0\); the condition is vacuously satisfied for it.
+
+\textbf{Condition failure does not cause collapse.} If a feed species appears in both
+streams (\(Y^{(1)}_i>0\) and \(Y^{(2)}_i>0\)) and \(d_i<0\), then \(M_i(f)>0\) for
+all \(f\) and \(c_{\max}\) remains positive. The only consequence is that \(B(f)\)
+loses its endpoint-pinning (\(B(0)\ne Y^{(2)}\) or \(B(1)\ne Y^{(1)}\)); the
+piecewise-linear machinery still computes the limit correctly.
+
+\end{document}

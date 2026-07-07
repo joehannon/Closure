@@ -1,0 +1,239 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+\newcommand{\fsb}{f_{sb}}
+\newcommand{\fsk}{f_{sk}}
+\newcommand{\Eb}{\mathbb{E}}
+
+\title{\vspace{-1.5em}\textbf{\large \texttt{blend\_fs}: dynamic reaction-limit closure
+for two-stream reactors}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+\begin{center}
+\small\itshape
+System: \texttt{input\_fuller\_BC\_azo\_coupling\_kinetics}\quad---\quad
+$\varepsilon = 1$ W/kg, $t = 0.0576$ s (${\approx}50\%$ A conversion)
+\end{center}
+
+%-----------------------------------------------------------------------
+\section{Overview}
+%-----------------------------------------------------------------------
+
+\texttt{blend\_fs} constructs a piecewise-linear concentration profile $C_i(f)$ over
+mixture fraction $f\in[0,1]$ that tracks the \emph{reaction limit} dynamically as the
+ODE composition evolves.  Rather than committing to a single stoichiometric subset, it
+blends $K\geq 1$ user-specified ``one-short'' subset limits, weighting them by the
+concentrations of their distinguishing products in the current ODE state.  The blend
+determines a kink position $\fsb$ and a peak height $v^{fs}_i$ for each species.  A
+scalar $\lambda_i\in[0,1]$ then interpolates between the no-reaction line and the limit
+profile so that the Beta-weighted mean matches the ODE value.
+
+The $K$ subsets are prescribed by the user via the \texttt{blend\_subsets} key in the
+JSON configuration file (e.g.\ \texttt{"blend\_subsets": [20, 31]}).  Each entry is an
+integer index into the enumeration of all reaction subsets; any number of subsets
+$K\geq 1$ may be listed.
+
+%-----------------------------------------------------------------------
+\section{Background: mixture fraction and Beta distribution}
+%-----------------------------------------------------------------------
+
+Mixture fraction $f$ is the stream-1 fraction.  Feed concentrations:
+\[
+  Y_1:\; A = 15\;\text{mol/L},\quad \text{others} = 0
+  \qquad
+  Y_2:\; B = C = 1.2\;\text{mol/L},\quad \text{others} = 0
+\]
+with mean $\bar{f} = 0.0625$.  At time $t$ the PDF is $\mathrm{Beta}(\alpha,\beta)$:
+\begin{equation}
+  s = \frac{\bar{f}(1-\bar{f})}{\sigma^2(t)} - 1,
+  \qquad
+  \alpha = \bar{f}\,s,
+  \qquad
+  \beta = (1-\bar{f})\,s
+  \label{eq:beta-params}
+\end{equation}
+At the example point: $\sigma^2 = 0.01622$, $s = 2.613$, $\alpha = 0.1633$,
+$\beta = 2.4498$, $\tau_s = 0.02476$ s.
+
+%-----------------------------------------------------------------------
+\section{Subset stoichiometric limits}
+%-----------------------------------------------------------------------
+
+For reaction subset $k\in\{1,\ldots,K\}$, the \emph{stoichiometric mixture fraction}
+$\fsk$ is the value of $f$ at which the stream-2 reactant is exactly consumed if only
+subset~$k$'s reactions run.  At $f = \fsk$ each species~$i$ attains a maximum
+concentration $c^{fs}_{ki}$.
+
+The \emph{no-reaction line} (conservative mixing, no reaction) is
+\begin{equation}
+  M_i(f) = Y_{2i} + (Y_{1i} - Y_{2i})\,f
+  \label{eq:no-reaction}
+\end{equation}
+
+The user prescribes the $K$ subset indices via \texttt{blend\_subsets}; for this example
+$K=2$ (subsets 20 and 31):
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lllll}
+\toprule
+Subset & Reactions & $\fsk$ & Distinguishing products
+       & $c^{fs}_k$ (non-zero, mol/L) \\
+\midrule
+20 & R1, R3, R5 & 0.1379 & R, T & R\,=\,T\,=\,0.5172;\; Q\,=\,1.0345 \\
+31 & R1--R5     & 0.1935 & S    & S\,=\,Q\,=\,0.9677 \\
+\bottomrule
+\end{tabular}
+\caption{Subset stoichiometric limits ($K=2$ example).  Distinguishing products are those
+present (non-zero) in subset~$k$'s limit but absent in all other subsets' limits.}
+\end{table}
+
+%-----------------------------------------------------------------------
+\section{Dynamic blend weights}
+%-----------------------------------------------------------------------
+
+Each subset $k$ has a set $\mathcal{D}_k$ of distinguishing products.  For
+$k=1,\ldots,K$ the weight is
+\begin{equation}
+  w_k = \frac{\displaystyle\sum_{i\in\mathcal{D}_k} y_i}
+             {\displaystyle\sum_{k'=1}^{K}\sum_{i\in\mathcal{D}_{k'}} y_i}
+  \label{eq:weights}
+\end{equation}
+where $y_i$ is the ODE concentration at the current step.  The weights sum to unity and
+shift dynamically as the composition evolves: subsets whose distinguishing products are
+more abundant receive higher weight.
+
+For this example ($K=2$) at the example point:
+\[
+  w_{20} = \frac{y_R + y_T}{(y_R + y_T) + y_S}
+          = \frac{0.2290 + 0.0083}{0.2290 + 0.0083 + 0.0187} = 0.9271
+  \qquad
+  w_{31} = 0.0729
+\]
+
+%-----------------------------------------------------------------------
+\section{Blended kink position $\fsb$}
+%-----------------------------------------------------------------------
+
+The kink is placed using \emph{odds ratios} to stay in the stoichiometric frame:
+\begin{equation}
+  s_k = \frac{\fsk}{1-\fsk},
+  \qquad
+  s_\mathrm{blend} = \sum_{k=1}^{K} w_k\,s_k,
+  \qquad
+  \fsb = \frac{s_\mathrm{blend}}{1+s_\mathrm{blend}}
+  \label{eq:kink}
+\end{equation}
+The odds ratio $s_k = \fsk/(1-\fsk)$ is proportional to the A:B molar consumption ratio
+in subset~$k$.  Averaging in odds-ratio space therefore averages the blended
+stoichiometry, which is the physically correct quantity to interpolate.
+
+For this example ($K=2$) at the example point:
+\[
+  s_{20} = \frac{0.1379}{0.8621} = 0.1600,
+  \quad
+  s_{31} = \frac{0.1935}{0.8065} = 0.2400
+\]
+\[
+  s_\mathrm{blend} = 0.9271\times 0.1600 + 0.0729\times 0.2400 = 0.16583
+  \qquad
+  \fsb = \frac{0.16583}{1.16583} = 0.1422
+\]
+
+%-----------------------------------------------------------------------
+\section{Control-point limit profile $B_i(f)$}
+%-----------------------------------------------------------------------
+
+The limit profile is a \emph{tent function} --- piecewise linear with a single kink
+at $\fsb$:
+\begin{equation}
+  B_i(f) = \begin{cases}
+    v^0_i + (v^{fs}_i - v^0_i)\,\dfrac{f}{\fsb} & f \le \fsb \\[8pt]
+    v^{fs}_i + (v^1_i - v^{fs}_i)\,\dfrac{f-\fsb}{1-\fsb} & f > \fsb
+  \end{cases}
+  \label{eq:tent}
+\end{equation}
+The peak is set by the stoichiometric yield re-scaled to $\fsb$:
+\begin{equation}
+  v^{fs}_i = (1-\fsb)\sum_{k=1}^{K} w_k \frac{c^{fs}_{ki}}{1-\fsk}
+  \label{eq:peak}
+\end{equation}
+The factor $c^{fs}_{ki}/(1-\fsk)$ is the yield of species~$i$ per unit of stream-2
+reactant consumed in subset~$k$; $(1-\fsb)$ is the stream-2 reactant available at
+$\fsb$.  The formula is exact for any $K$ because each subset's yield is independent of
+the others.  The endpoints $v^0_i$ and $v^1_i$ are weighted averages of the subset
+endpoint values; for unfed product species both are zero.
+
+\textbf{Example ($K=2$) --- species R and S:}
+\begin{align}
+  v^{fs}_R &= 0.8578\times\Bigl[0.9271\times\tfrac{0.5172}{0.8621} + 0\Bigr]
+             = 0.4771\;\text{mol/L} \label{eq:vfsR}\\
+  v^{fs}_S &= 0.8578\times\Bigl[0 + 0.0729\times\tfrac{0.9677}{0.8065}\Bigr]
+             = 0.0751\;\text{mol/L} \label{eq:vfsS}
+\end{align}
+
+%-----------------------------------------------------------------------
+\section{Species profile $C_i(f)$ and $\lambda_i$}
+%-----------------------------------------------------------------------
+
+The full profile starts from the blended limit and adds a correction toward the
+no-reaction line:
+\begin{equation}
+  C_i(f) = B_i(f) + \bigl[M_i(f) - B_i(f)\bigr]\,\lambda_i
+  \label{eq:Cprofile}
+\end{equation}
+$\lambda_i$ is chosen so that the Beta-weighted mean matches the ODE value $y_i$:
+\begin{equation}
+  \lambda_i = \frac{y_i - \Eb[B_i]}{\Eb[M_i] - \Eb[B_i]},
+  \qquad \lambda_i \in [0,1]
+  \label{eq:lambda}
+\end{equation}
+$\lambda_i = 0$ gives the pure limit profile $B_i$; $\lambda_i = 1$ gives the pure
+no-reaction line $M_i$.  For unfed product species $M_i(f) = 0$, so $\Eb[M_i] = 0$ and
+$\lambda_i = 1 - y_i/\Eb[B_i]$.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Species & $y_i$ (mol/L) & $\Eb[B_i]$ (mol/L) & $\lambda_i$ (raw) & $\lambda_i$ (clamped) \\
+\midrule
+R & 0.2290 & 0.1070 & $-1.14$ & 0.0 \\
+S & 0.0187 & 0.01682 & $-0.11$ & 0.0 \\
+\bottomrule
+\end{tabular}
+\caption{Interpolation parameters at the example point.  Both species clamp to
+$\lambda=0$: the ODE concentrations exceed the Beta-weighted limit-profile mean, so
+$C_i(f) = B_i(f)$.}
+\end{table}
+
+%-----------------------------------------------------------------------
+\section{Rate integrals}
+%-----------------------------------------------------------------------
+
+The turbulent reaction rate for reaction $j$ is
+\begin{equation}
+  r_j = \int_0^1 k_j \prod_i C_i(f)^{n_{ij}}\;\mathrm{Beta}(f;\alpha,\beta)\,df
+  \label{eq:rate}
+\end{equation}
+Because each $C_i(f)$ is piecewise linear in $f$, the integrand on each segment
+$[0,\fsb]$ and $[\fsb,1]$ is a polynomial in $f$.  The integral over each segment is
+evaluated analytically using the regularised incomplete Beta function
+$I_x(a,b) = B(x;\,a,b)/B(a,b)$.
+
+Rate constants (L mol$^{-1}$ s$^{-1}$):
+$k_1 = 12238$, $k_2 = 1.835$, $k_3 = 921$, $k_4 = 22.25$, $k_5 = 124.5$.
+
+\end{document}

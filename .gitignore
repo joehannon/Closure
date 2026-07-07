@@ -1,0 +1,22 @@
+# OS / editor
+.DS_Store
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Reference material (not for redistribution)
+ref/
+
+# Old manual backups (superseded by git history)
+backups/
+
+# Generated outputs
+plots/
+logs/
+run_logs/
+*.csv
+
+# Misc
+untitled folder/
