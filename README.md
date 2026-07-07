@@ -6,7 +6,7 @@ Not ready to be used yet, will make this pip installable when it's ready, probab
 
 The key code is species_limits.py.  You feed that a JSON describing the chemical reaction system
 ```
-python3 species_limits.py inputs/filename.JSON
+python3 species_limits.py inputs/<filename>.JSON
 ```
 
 You can get the gist of what this does by reading my [blog](https://joehannon.github.io/blog/).
