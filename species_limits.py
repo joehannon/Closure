@@ -12,6 +12,22 @@ from scipy import stats as _stats
 # m_epsilon is supplied.  Set this in one place to change the default everywhere.
 DEFAULT_M_EPSILON = 1.0E+2
 
+# Fixed per-method line/marker style, keyed by weight_method name (not by
+# position in a list), so a given method always looks the same across every
+# plot that overlays results from multiple methods.
+_WM_STYLE = {
+    'blend_fs':      dict(ls='-',  mk='o', mfc=None,   mew=0.5),  # filled circle,  solid
+    'ray_limit':     dict(ls='--', mk='s', mfc='none', mew=1.4),  # hollow square,  dashed
+    'linear_interp': dict(ls=':',  mk='D', mfc='none', mew=1.4),  # hollow diamond, dotted
+    'Extend_2025':   dict(ls='-.', mk='^', mfc=None,   mew=0.5),  # filled triangle, dash-dot
+}
+_WM_STYLE_FALLBACK = dict(ls=(0, (3, 1, 1, 1)), mk='v', mfc=None, mew=0.5)
+
+
+def _wm_style(weight_method):
+    """Fixed marker/linestyle for *weight_method*, same everywhere it's plotted."""
+    return _WM_STYLE.get(weight_method, _WM_STYLE_FALLBACK)
+
 # CVODE (BDF) solve tolerances for the species ODEs.  Tighter than a casual
 # default because ray_limit's complete-reaction limit is rebuilt from the live
 # state, giving a non-smooth RHS: at loose tolerances the adaptive stepper places
@@ -1776,7 +1792,6 @@ def plot_ode_trajectories(ode_results, save_stem=None):
         return fig.add_subplot(gs[r, c])
 
     method_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    _ls_cycle   = ['-', '--', ':']
     _sp_markers = ['o', '^', 's', 'D', 'v', '<', '>', 'p', 'h', '*']
 
     # ── Species panels ────────────────────────────────────────────────────────
@@ -1826,8 +1841,12 @@ def plot_ode_trajectories(ode_results, save_stem=None):
             for res_idx, res in enumerate(ode_results):
                 method = res.get('weight_method', f'run{res_idx}')
                 color = method_colors[res_idx % len(method_colors)]
-                ax.plot(res['t'], res['y'][:, i], lw=1.5, color=color,
-                        ls=_ls_cycle[res_idx % 3], label=method)
+                st = _wm_style(method)
+                every = max(1, len(res['t']) // 15)
+                mfc = color if st['mfc'] is None else 'none'
+                ax.plot(res['t'], res['y'][:, i], lw=1.5, color=color, ls=st['ls'],
+                        marker=st['mk'], ms=4, markevery=every, mfc=mfc, mew=st['mew'],
+                        label=method)
             ax.axhline(ref['y'][0, i], color='gray', lw=0.7, ls='--', alpha=0.5)
             ax.set_title(sp, fontsize=10)
             ax.set_xlabel('t (s)', fontsize=8)
@@ -1847,7 +1866,7 @@ def plot_ode_trajectories(ode_results, save_stem=None):
     ax_var.tick_params(labelsize=7)
     ax_var.grid(True, alpha=0.3)
 
-    # ── One subplot per reaction (lines only, no markers) ────────────────────
+    # ── One subplot per reaction (colour = reaction; linestyle+marker = method) ──
     if has_rates:
         rxn_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
         cont_times = sorted({t for r in ode_results
@@ -1862,8 +1881,11 @@ def plot_ode_trajectories(ode_results, save_stem=None):
                 if rates is None or j >= rates.shape[1]:
                     continue
                 method = res.get('weight_method', f'run{res_idx}')
-                ls = _ls_cycle[res_idx % len(_ls_cycle)]
-                ax_r.plot(res['t'], rates[:, j], color=color, ls=ls, lw=1.5,
+                st = _wm_style(method)
+                every = max(1, len(res['t']) // 15)
+                mfc = color if st['mfc'] is None else 'none'
+                ax_r.plot(res['t'], rates[:, j], color=color, ls=st['ls'], lw=1.5,
+                          marker=st['mk'], ms=4, markevery=every, mfc=mfc, mew=st['mew'],
                           label=method if len(ode_results) > 1 else None)
             for t_c in cont_times:
                 ax_r.axvline(t_c, color='green', lw=0.8, ls='--', alpha=0.4)
@@ -2506,15 +2528,10 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     _sweep_palette = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
     color = {p: _sp_color(p, _all_species or [], _sweep_palette) for p in all_products}
     # Per-method visual encoding: linestyle, marker shape, fill (None=filled / 'none'=hollow),
-    # marker edge width, and line width.  Alternating filled/hollow makes methods
-    # distinguishable even when two curves share the same product colour.
-    _wm_styles = [
-        dict(ls='-',   mk='o', mfc=None,   mew=0.5, lw=2.0),   # filled circle,  solid
-        dict(ls='--',  mk='s', mfc='none', mew=1.4, lw=1.8),   # hollow square,  dashed
-        dict(ls=':',   mk='^', mfc=None,   mew=0.5, lw=2.0),   # filled triangle, dotted
-        dict(ls='-.',  mk='D', mfc='none', mew=1.4, lw=1.8),   # hollow diamond, dash-dot
-        dict(ls=(0, (3, 1, 1, 1)), mk='v', mfc=None, mew=0.5, lw=2.0),  # filled triangle-down, dash-dot-dot
-    ]
+    # and marker edge width, from the shared _WM_STYLE mapping (same symbol for
+    # a given method in every plot).  Filled vs. hollow also gets a slightly
+    # heavier/lighter line weight so methods stay distinguishable even when two
+    # curves share the same product colour.
     _ms = 6   # marker size (uniform)
     # Conversion and TOTAL (closure checks) live on a right-hand y-axis.
     ax_chk = ax.twinx()
@@ -2523,8 +2540,9 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     for m_idx, wm in enumerate(weight_methods):
         if wm not in sweep:
             continue
-        st = _wm_styles[m_idx % len(_wm_styles)]
-        ls, mk, mew, lw = st['ls'], st['mk'], st['mew'], st['lw']
+        st = _wm_style(wm)
+        ls, mk, mew = st['ls'], st['mk'], st['mew']
+        lw = 2.0 if st['mfc'] is None else 1.8
         s = sweep[wm]
         for p in all_products:
             if p not in s['fractions']:
@@ -2573,9 +2591,9 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     for m_idx, wm in enumerate(weight_methods):
         if wm not in sweep:
             continue
-        st = _wm_styles[m_idx % len(_wm_styles)]
+        st = _wm_style(wm)
         _mfc_leg = 'k' if st['mfc'] is None else 'none'
-        leg_h.append(Line2D([0], [0], color='k', lw=st['lw'],
+        leg_h.append(Line2D([0], [0], color='k', lw=2.0 if st['mfc'] is None else 1.8,
                              ls=st['ls'], marker=st['mk'],
                              ms=_ms, mfc=_mfc_leg, mew=st['mew']))
         leg_l.append(wm)
@@ -2588,12 +2606,13 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
         for m_idx, wm in enumerate(weight_methods):
             if wm not in sweep or 'fsb_finals' not in sweep[wm]:
                 continue
-            st = _wm_styles[m_idx % len(_wm_styles)]
+            st = _wm_style(wm)
             s = sweep[wm]
             _mfc_fs = 'black' if st['mfc'] is None else 'none'
             ax_fs.plot(s['epsilons'], s['fsb_finals'], st['ls'],
                        marker=st['mk'], color='black',
-                       mfc=_mfc_fs, mew=st['mew'], ms=_ms, lw=st['lw'],
+                       mfc=_mfc_fs, mew=st['mew'], ms=_ms,
+                       lw=2.0 if st['mfc'] is None else 1.8,
                        label=wm)
         ax_fs.set_xscale('log')
         ax_fs.set_xticks(10.0 ** _decades.astype(float))
