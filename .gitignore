@@ -23,17 +23,9 @@ species/
 # Working input configs (a curated examples/ folder will replace this)
 inputs/
 
-# Math summaries (regenerable via docs/*_math_summary.tex + tectonic)
-docs/blend_fs_summary.md
-docs/blend_fs_summary.pdf
-docs/blend_fs_summary.tex
-docs/ray_limit_math_summary.md
-docs/ray_limit_math_summary.pdf
-docs/ray_limit_math_summary.tex
-docs/extend2025_math_summary.md
-docs/extend2025_math_summary.pdf
-docs/extend2025_math_summary.tex
-docs/linear_interp_math_summary.md
+# Docs and dev utilities (not for redistribution)
+docs/
+utils/
 
 # Misc
 untitled folder/
