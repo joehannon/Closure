@@ -7,7 +7,7 @@
 
   "mean_f": 0.5,
   "epsilon":[1e-3],
-  "weight_methods": [2,3],
+  "weight_methods": [2],
 
   "rate_constants": {
     "R1": 100000,

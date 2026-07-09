@@ -2293,28 +2293,28 @@ def _blend_fs_check_runnable(unique_sp_data, stream_1_feed, stream_2_feed, blend
     active_indices = np.where(active_mask)[0]
     Y1 = np.asarray(stream_1_feed, dtype=float)
     Y2 = np.asarray(stream_2_feed, dtype=float)
-    sp_pl, sp_pd = {}, {}
+    sp_profiles, sp_profile_arrays = {}, {}
     for sp in species_list:
         if sp not in species_data or not species_data[sp]:
             continue
         plist = list(species_data[sp].items())
-        sp_pl[sp] = plist
-        sp_pd[sp] = [(np.array(prof['breakpoints'], dtype=float),
+        sp_profiles[sp] = plist
+        sp_profile_arrays[sp] = [(np.array(prof['breakpoints'], dtype=float),
                       np.array(prof['segments'], dtype=float))
                      for _, prof in plist]
     def _psub(label):
         return [int(x) for x in str(label).split('_')]
-    _avail = sorted({s for sp in sp_pl for lbl, _ in sp_pl[sp] for s in _psub(lbl)})
+    _avail = sorted({s for sp in sp_profiles for lbl, _ in sp_profiles[sp] for s in _psub(lbl)})
     _sub2prof = {s: {} for s in _avail}
-    for sp in sp_pl:
-        for pidx, (lbl, _) in enumerate(sp_pl[sp]):
+    for sp in sp_profiles:
+        for pidx, (lbl, _) in enumerate(sp_profiles[sp]):
             for s in _psub(lbl):
                 if s in _sub2prof:
                     _sub2prof[s][sp] = pidx
     _is_prod = np.asarray(nu_products).sum(axis=1) > 0
     _fed = (Y1 > 0) | (Y2 > 0)
     full_products = [int(i) for i in active_indices
-                     if _is_prod[i] and not _fed[i] and species_list[i] in sp_pl]
+                     if _is_prod[i] and not _fed[i] and species_list[i] in sp_profiles]
     _fullset = set(full_products)
     def _prods_of(subnum):
         out = set()
@@ -2322,18 +2322,18 @@ def _blend_fs_check_runnable(unique_sp_data, stream_1_feed, stream_2_feed, blend
             p = _sub2prof[subnum].get(species_list[i])
             if p is None:
                 continue
-            segs = sp_pd[species_list[i]][p][1]
+            segs = sp_profile_arrays[species_list[i]][p][1]
             if segs.size and float(np.abs(segs).max()) > 1e-12:
                 out.add(i)
         return out
-    _ps = {s: _prods_of(s) for s in _avail}
+    _prods_by_subset = {s: _prods_of(s) for s in _avail}
     if blend_subsets is not None:
         _req = [int(s) for s in blend_subsets]
         bf_subs = [s for s in _req if s in _avail]
     elif len(_avail) == 2:
         bf_subs = list(_avail)
     else:
-        bf_subs = [s for s in _avail if len(_fullset - _ps[s]) == 1]
+        bf_subs = [s for s in _avail if len(_fullset - _prods_by_subset[s]) == 1]
     return len(bf_subs) >= 2
 
 
@@ -2341,7 +2341,8 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
                                     epsilons=None, rate_constants=None,
                                     mean_f=0.2, weight_methods=('linear_interp',),
                                     conversion_target=0.999, n_out=200, save_stem=None,
-                                    blend_subsets=None, ode_rtol=None, ode_atol=None,
+                                    blend_subsets=None,
+                                    ode_rtol=None, ode_atol=None,
                                     reaction_orders=None):
     """Sweep the turbulent dissipation rate ε and plot the product fractions X_species.
 
@@ -2396,7 +2397,7 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     _all_species = None   # captured from first ODE result for consistent colouring
     sweep = {}
     for wm in weight_methods:
-        if wm in ('blend_fs', 'blend_auto') and not _blend_fs_check_runnable(
+        if wm == 'blend_fs' and not _blend_fs_check_runnable(
                 unique_sp_data, stream_1_feed, stream_2_feed,
                 blend_subsets if wm == 'blend_fs' else None):
             print(f"[sweep]   [{wm}] not runnable (fewer than 2 products available "
@@ -2411,7 +2412,7 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
         _skipped = False
         total_cpu_s = 0.0
         total_clamps = 0
-        _track_fsb = wm in ('blend_fs', 'blend_auto', 'ray_limit')
+        _track_fsb = wm in ('blend_fs', 'ray_limit', 'Extend_2025')
         fsb_finals = [] if _track_fsb else None
         sp_clamp_pcts = {}  # {sp: [pct_per_epsilon]}
         for eps in epsilons:
@@ -2442,12 +2443,15 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
             total_cpu_s += float(res.get('solve_cpu_s', 0.0))
             total_clamps += _clamp_total(res)
             _n_t = len(res['t'])
-            if wm in ('blend_fs', 'blend_auto'):
+            if wm == 'blend_fs':
                 _lo_d = res.get('blendfs', {}).get('clamp_below_M', {})
                 _hi_d = res.get('blendfs', {}).get('clamp_above_B', {})
             elif wm == 'ray_limit':
                 _lo_d = res.get('raylimit', {}).get('clamp_below_M', {})
                 _hi_d = res.get('raylimit', {}).get('clamp_above_B', {})
+            elif wm == 'Extend_2025':
+                _lo_d = res.get('extend2025', {}).get('clamp_below_M', {})
+                _hi_d = res.get('extend2025', {}).get('clamp_above_B', {})
             elif wm == 'linear_interp':
                 _lo_d = res.get('li_clamps', {}).get('clamp_below_min', {})
                 _hi_d = res.get('li_clamps', {}).get('clamp_above_max', {})
@@ -2457,8 +2461,10 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
                 _pct = 100.0 * (_lo_d.get(_sp, 0) + _hi_d.get(_sp, 0)) / _n_t
                 sp_clamp_pcts.setdefault(_sp, []).append(_pct)
             if _track_fsb:
-                if wm in ('blend_fs', 'blend_auto'):
+                if wm == 'blend_fs':
                     _arr = res.get('blendfs', {}).get('fsb')
+                elif wm == 'Extend_2025':
+                    _arr = res.get('extend2025', {}).get('fsb')
                 else:
                     _arr = res.get('raylimit', {}).get('fsb')
                 if _arr is not None and len(_arr) > 0:
@@ -2507,12 +2513,12 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
         dict(ls='--',  mk='s', mfc='none', mew=1.4, lw=1.8),   # hollow square,  dashed
         dict(ls=':',   mk='^', mfc=None,   mew=0.5, lw=2.0),   # filled triangle, dotted
         dict(ls='-.',  mk='D', mfc='none', mew=1.4, lw=1.8),   # hollow diamond, dash-dot
+        dict(ls=(0, (3, 1, 1, 1)), mk='v', mfc=None, mew=0.5, lw=2.0),  # filled triangle-down, dash-dot-dot
     ]
     _ms = 6   # marker size (uniform)
     # Conversion and TOTAL (closure checks) live on a right-hand y-axis.
     ax_chk = ax.twinx()
     _present_wms = _present_wms_early
-    multi = len(_present_wms) > 1
     eps_x = sweep[_present_wms[0]]['epsilons']
     for m_idx, wm in enumerate(weight_methods):
         if wm not in sweep:
@@ -2564,7 +2570,9 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     leg_l.append('TOTAL (right axis)')
     leg_h.append(Line2D([0], [0], color='tab:gray', lw=1.5))
     leg_l.append('X_conv (right axis)')
-    for m_idx, wm in enumerate(_present_wms):
+    for m_idx, wm in enumerate(weight_methods):
+        if wm not in sweep:
+            continue
         st = _wm_styles[m_idx % len(_wm_styles)]
         _mfc_leg = 'k' if st['mfc'] is None else 'none'
         leg_h.append(Line2D([0], [0], color='k', lw=st['lw'],
@@ -2747,7 +2755,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                             weight_method='linear_interp',
                             conversion_target=0.999, blend_subsets=None,
                             ode_rtol=None, ode_atol=None,
-                            reaction_orders=None, blend_clamp=True):
+                            reaction_orders=None):
     """Integrate species concentration ODEs with mixing-dependent reaction rates.
 
     State y_i(t) is the concentration of species i.  At each step the
@@ -2799,20 +2807,20 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     var_end   = max_var * 1e-6
 
     # ── Precompute per-species profile data ───────────────────────────────
-    sp_pd = {}   # sp -> [(bps_arr, segs_arr), ...]  one entry per unique profile
-    sp_pl = {}   # sp -> [(label, profile_dict), ...]
+    sp_profile_arrays = {}   # sp -> [(bps_arr, segs_arr), ...]  one entry per unique profile
+    sp_profiles = {}   # sp -> [(label, profile_dict), ...]
     for sp in species_list:
         if sp not in species_data or not species_data[sp]:
             continue
         plist = list(species_data[sp].items())
-        sp_pl[sp] = plist
-        sp_pd[sp] = [(np.array(prof['breakpoints'], dtype=float),
+        sp_profiles[sp] = plist
+        sp_profile_arrays[sp] = [(np.array(prof['breakpoints'], dtype=float),
                       np.array(prof['segments'], dtype=float))
                      for _, prof in plist]
 
     # Union of all species breakpoints → integration sub-intervals
     all_bps_set = {0.0, 1.0}
-    for pd_list in sp_pd.values():
+    for pd_list in sp_profile_arrays.values():
         for bps, _ in pd_list:
             all_bps_set.update(bps.tolist())
     all_bps = np.array(sorted(all_bps_set))
@@ -2873,13 +2881,13 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     sp_to_global = {sp: i for i, sp in enumerate(species_list)}
 
     # ── Precompute hot-path geometry (independent of alpha/beta/weights) ────
-    # sp_bp_idx[sp][n] : indices into all_bps for profile n's breakpoints.
+    # sp_bp_positions[sp][n] : indices into all_bps for profile n's breakpoints.
     # sp_seg_MB[sp]    : array [n_profiles, n_segs, 2] of (slope, intercept) of
     #                    each profile on each shared all_bps sub-interval.
-    sp_bp_idx = {}
+    sp_bp_positions = {}
     sp_seg_MB = {}
-    for sp, pd_list in sp_pd.items():
-        sp_bp_idx[sp] = [np.searchsorted(all_bps, bps) for (bps, _segs) in pd_list]
+    for sp, pd_list in sp_profile_arrays.items():
+        sp_bp_positions[sp] = [np.searchsorted(all_bps, bps) for (bps, _segs) in pd_list]
         mb = np.zeros((len(pd_list), n_segs, 2))
         for n, (bps, segs) in enumerate(pd_list):
             for seg_k in range(n_segs):
@@ -2902,7 +2910,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     # weights come from the distinguishing products' ODE amounts.  Everything that
     # is constant in time (the two subsets, their fs, and each species' values at
     # f=0, f=1 and at each subset's own fs) is precomputed here.
-    is_blendfs = weight_method in ('blend_fs', 'blend_auto')
+    is_blendfs = weight_method == 'blend_fs'
     blendfs_ok = False
     if is_blendfs:
         import contextlib as _ctx
@@ -2913,17 +2921,17 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         def _psub(label):
             return [int(x) for x in str(label).split('_')]
 
-        _avail = sorted({s for sp in sp_pl for lbl, _ in sp_pl[sp] for s in _psub(lbl)})
+        _avail = sorted({s for sp in sp_profiles for lbl, _ in sp_profiles[sp] for s in _psub(lbl)})
         _sub2prof = {s: {} for s in _avail}   # subnum -> {species_name: profile idx}
-        for sp in sp_pl:
-            for pidx, (lbl, _) in enumerate(sp_pl[sp]):
+        for sp in sp_profiles:
+            for pidx, (lbl, _) in enumerate(sp_profiles[sp]):
                 for s in _psub(lbl):
                     if s in _sub2prof:
                         _sub2prof[s][sp] = pidx
         _is_prod = np.asarray(nu_products).sum(axis=1) > 0
         _fed = (np.asarray(Y1) > 0) | (np.asarray(Y2) > 0)
         full_products = [int(i) for i in active_indices
-                         if _is_prod[i] and not _fed[i] and species_list[i] in sp_pl]
+                         if _is_prod[i] and not _fed[i] and species_list[i] in sp_profiles]
 
         def _prods_of(subnum):
             out = set()
@@ -2931,13 +2939,13 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                 p = _sub2prof[subnum].get(species_list[i])
                 if p is None:
                     continue
-                segs = sp_pd[species_list[i]][p][1]
+                segs = sp_profile_arrays[species_list[i]][p][1]
                 if segs.size and float(np.abs(segs).max()) > 1e-12:
                     out.add(i)
             return out
 
         _fullset = set(full_products)
-        _ps = {s: _prods_of(s) for s in _avail}
+        _prods_by_subset = {s: _prods_of(s) for s in _avail}
         # Which subsets to blend:
         #  • Explicit: if the JSON gives ``blend_subsets`` (a blend_fs-only option —
         #    it does NOT restrict the subset pool the other methods see), blend
@@ -2949,7 +2957,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         # that the OTHER blended subsets do not (produced at one limit but
         # consumed-or-not-produced at the others).  The default weights each one-short
         # subset by its missing-products that it nonetheless makes.
-        _explicit = (blend_subsets is not None) and (weight_method == 'blend_fs')
+        _explicit = blend_subsets is not None
         if _explicit:
             _req = [int(s) for s in blend_subsets]
             bf_subs = [s for s in _req if s in _avail]
@@ -2963,7 +2971,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             if _two_subset:
                 bf_subs = list(_avail)
             else:
-                bf_subs = [s for s in _avail if len(_fullset - _ps[s]) == 1]
+                bf_subs = [s for s in _avail if len(_fullset - _prods_by_subset[s]) == 1]
         if len(bf_subs) >= 2:
             def _ana(subnum):
                 idx = list(_enum_bf[subnum])
@@ -2974,8 +2982,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                     seg = generate_line_segments(species_list, Y1, Y2, res)
                 return res['fs'], seg['all_reactions']
 
-            _missing_union = set().union(*[_fullset - _ps[s] for s in bf_subs])
-            bf_fs, bf_dist, bf_lens, bf_misses = [], [], [], []
+            _missing_union = set().union(*[_fullset - _prods_by_subset[s] for s in bf_subs])
+            bf_fs, bf_distinguishing, bf_sizes, bf_misses = [], [], [], []
             bf_c0, bf_c1, bf_cfs = [], [], []   # per subset: {sp: value}
             _ok = True
             for k, s in enumerate(bf_subs):
@@ -2992,13 +3000,13 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                 #    blended subsets do not;
                 #  • default: the set's missing-products that this subset makes.
                 if _explicit or _two_subset:
-                    _others = set().union(*[_ps[o] for o in bf_subs if o != s]) \
+                    _others = set().union(*[_prods_by_subset[o] for o in bf_subs if o != s]) \
                         if len(bf_subs) > 1 else set()
-                    bf_dist.append(sorted(_ps[s] - _others))
+                    bf_distinguishing.append(sorted(_prods_by_subset[s] - _others))
                 else:
-                    bf_dist.append(sorted(_ps[s] & _missing_union))
-                bf_lens.append(len(_enum_bf[s]))
-                bf_misses.append([species_list[i] for i in (_fullset - _ps[s])])
+                    bf_distinguishing.append(sorted(_prods_by_subset[s] & _missing_union))
+                bf_sizes.append(len(_enum_bf[s]))
+                bf_misses.append([species_list[i] for i in (_fullset - _prods_by_subset[s])])
             blendfs_ok = _ok
             if blendfs_ok:
                 bf_n = len(bf_subs)
@@ -3006,7 +3014,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                     _tag = "blend_subsets" if _explicit else "two-subset"
                     print(f"[{weight_method}]   [blend] {_tag} blend of subsets {bf_subs}: " + "; ".join(
                         f"subset {bf_subs[k]} (fs={bf_fs[k]:.4f}, distinguishing "
-                        f"{[species_list[i] for i in bf_dist[k]]})" for k in range(bf_n)))
+                        f"{[species_list[i] for i in bf_distinguishing[k]]})" for k in range(bf_n)))
                 else:
                     print(f"[{weight_method}]   [blend] {bf_n} one-short limits: " + "; ".join(
                         f"subset {bf_subs[k]} misses {bf_misses[k]} (fs={bf_fs[k]:.4f})"
@@ -3026,33 +3034,57 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     is_raylimit = (weight_method == 'ray_limit')
     raylimit_ok = is_raylimit and (n_rxns > 0) and (n_active > 0)
     if raylimit_ok:
-        # Feed vectors restricted to active species, for the mixing line M(f).
-        rl_Y1a = np.array([float(Y1[i]) for i in active_indices])
-        rl_Y2a = np.array([float(Y2[i]) for i in active_indices])
         print(f"[ray_limit]   [selectivity] from current reaction rates; "
               f"{n_rxns} reactions over {n_active} active species.")
     elif is_raylimit:
         print("[ray_limit]   [selectivity] no active reactions/species; "
               "falling back to linear_interp behaviour.")
 
+    # ── Extend_2025-method precompute ───────────────────────────────────────
+    # The collapsed net reaction d = Σ_j ξ_j·N_j (N_j = each reaction's net
+    # stoichiometric column, ξ_j its extent) is, by the definition of extent,
+    # always exactly y - y0 — so it's obtained directly from Δy rather than
+    # tracking ξ_j individually.  d's components are the one-line reaction's
+    # own coefficients, fed into the standard closed-form stoichiometric
+    # mixture-fraction formula (fs = kappa2/(kappa1+kappa2), see
+    # _extend_closed_fs below) rather than ray_limit's general breakpoint
+    # search — falling back to that search only if a net-reactant species is
+    # fed by both streams, where the closed form doesn't apply.  See the
+    # "Extend_2025 rate path" section further below for the full derivation.
+    is_extend = (weight_method == 'Extend_2025')
+    extend_ok = is_extend and (n_rxns > 0) and (n_active > 0)
+    if extend_ok:
+        print(f"[Extend_2025]   [selectivity] from Δy (collapsed net extent), "
+              f"closed-form stoichiometric fs; "
+              f"{n_rxns} reactions over {n_active} active species.")
+    elif is_extend:
+        print("[Extend_2025]   [selectivity] no active reactions/species; "
+              "falling back to linear_interp behaviour.")
+
+    # Feed vectors restricted to active species (for the mixing line M(f)),
+    # needed by both ray_limit and Extend_2025's shared _raylimit_limit call.
+    if raylimit_ok or extend_ok:
+        rl_Y1a = np.array([float(Y1[i]) for i in active_indices])
+        rl_Y2a = np.array([float(Y2[i]) for i in active_indices])
+
     # ── Local helpers ─────────────────────────────────────────────────────
-    def _e_vals(sp, Btab, a_over_ab):
-        """Beta-weighted average of each unique profile for *sp* (via Btab)."""
-        pd_list = sp_pd.get(sp)
+    def _e_vals(sp, Bt, a_over_ab):
+        """Beta-weighted average of each unique profile for *sp* (via Bt)."""
+        pd_list = sp_profile_arrays.get(sp)
         if pd_list is None:
             return np.array([])
-        idx_list = sp_bp_idx[sp]
+        idx_list = sp_bp_positions[sp]
         ev = np.zeros(len(pd_list))
         for n, (bps, segs) in enumerate(pd_list):
             bidx = idx_list[n]
             for j in range(len(segs)):
                 lo_i, hi_i = bidx[j], bidx[j + 1]
-                dI0 = Btab[0, hi_i] - Btab[0, lo_i]
-                dI1 = Btab[1, hi_i] - Btab[1, lo_i]
+                dI0 = Bt[0, hi_i] - Bt[0, lo_i]
+                dI1 = Bt[1, hi_i] - Bt[1, lo_i]
                 ev[n] += segs[j, 0] * a_over_ab * dI1 + segs[j, 1] * dI0
         return ev
 
-    def _poly_beta_int(poly, Btab, ratio, lo_i, hi_i):
+    def _poly_beta_int(poly, Bt, ratio, lo_i, hi_i):
         """Integrate polynomial (highest-degree first) * Beta on [all_bps[lo_i], all_bps[hi_i]]."""
         degree = len(poly) - 1
         total = 0.0
@@ -3060,7 +3092,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             if abs(c) < 1e-300:
                 continue
             d = degree - k_from_top
-            dI = Btab[d, hi_i] - Btab[d, lo_i]
+            dI = Bt[d, hi_i] - Bt[d, lo_i]
             total += c * ratio[d] * dI
         return total
 
@@ -3078,14 +3110,14 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         """(w[k] over the one-short subsets, fs_blend) from each subset's
         distinguishing products' ODE amounts."""
         amts = np.array([
-            sum(max(float(y_active[global_to_active[i]]), 0.0) for i in bf_dist[k])
+            sum(max(float(y_active[global_to_active[i]]), 0.0) for i in bf_distinguishing[k])
             for k in range(bf_n)])
         tot = float(amts.sum())
         if tot > 1e-300:
             w = amts / tot
         else:  # no distinguishing product yet -> all weight to the smallest subset
             w = np.zeros(bf_n)
-            w[int(np.argmin(bf_lens))] = 1.0
+            w[int(np.argmin(bf_sizes))] = 1.0
         bf_fs_arr = np.array(bf_fs)
         s_k       = bf_fs_arr / (1.0 - bf_fs_arr)   # odds ratio: fs/(1-fs) for each subset
         s_blend   = float(np.dot(w, s_k))            # blend A:B consumption ratios
@@ -3132,9 +3164,9 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             yi = max(float(y_active[ai]), 0.0)
             denom = e_M - e_B
             lam0 = (yi - e_B) / denom if abs(denom) > 1e-9 * (abs(e_M) + abs(e_B) + 1.0) else 1.0
-            lam = min(1.0, max(0.0, lam0)) if blend_clamp else lam0
+            lam = min(1.0, max(0.0, lam0))
             if (lam0 < -1e-9 or lam0 > 1.0 + 1e-9) and _blendfs_lam_reported[0] < 10:
-                print(f"[blend_clamp={blend_clamp}]  {sp}: lam0={lam0:.4f}  lam={lam:.4f}")
+                print(f"[clamp]  {sp}: lam0={lam0:.4f}  lam={lam:.4f}")
                 _blendfs_lam_reported[0] += 1
             info[sp] = (e_B, lam0, lam, v0, vfs, v1)
             Cseg[sp] = ((lam * mM + (1 - lam) * Bs0, lam * mB + (1 - lam) * Bi0),
@@ -3199,7 +3231,9 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
 
         Returns (bps, Bvals) where bps is a 1-D array of breakpoints in [0,1]
         and Bvals has shape (len(bps), n_active), or (None, None) when nothing
-        reacts.  Pure cross-stream: d = Δ = y − y0, one interior kink."""
+        reacts.  Pure cross-stream: d = Δ = y − y0, one interior kink.  Shared
+        by ray_limit and Extend_2025 (whose d = Σξ_j·N_j collapses to exactly
+        the same Δy — see the Extend_2025 rate path below)."""
         d = _selectivity_ray(y_active)
         if d is None:
             return None, None
@@ -3319,6 +3353,158 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             rates[j] = r_j
         return rates, info
 
+    # ── Extend_2025 rate path ─────────────────────────────────────────────────
+    # A single collapsed reaction d = Σ_j ξ_j·N_j (N_j = each reaction's net
+    # stoichiometric column, ξ_j its live extent).  d = Σ_j ξ_j·N_j is, by the
+    # definition of extent, always exactly y_active − y0, so it's computed by
+    # reusing _selectivity_ray directly rather than tracking each ξ_j
+    # separately (an earlier version tracked ξ_j as its own ODE state
+    # variable to feed a per-reaction-weighted LP — useful when individual ξ_j
+    # are needed, e.g. to resolve cascades, but once collapsed to one net
+    # reaction only the sum matters, and the sum is already exactly Δy).
+    #
+    # d's components are the one-line reaction's own coefficients (νᵢ = -dᵢ
+    # for reactants).  fs is found via the standard two-stream stoichiometric
+    # mixture-fraction formula rather than ray_limit's general breakpoint
+    # search: reactants fed purely by stream 1 give an achievable extent
+    # κ1(f) = f·min(Y1ᵢ/νᵢ) (increasing from 0), reactants fed purely by
+    # stream 2 give κ2(f) = (1-f)·min(Y2ⱼ/νⱼ) (decreasing to 0), and fs is
+    # where the two meet: fs = κ2/(κ1+κ2), a single kink.  This only holds
+    # when every net-reactant species is fed by exactly one stream; if one is
+    # fed by both, Extend_2025 refuses to compute a limit for that step
+    # (rates set to 0) rather than silently falling back to ray_limit's
+    # general breakpoint search.
+
+    _mixed_feed_warned = [False]
+
+    def _extend_closed_fs(y_active):
+        """Complete-reaction limit B(f), single-kink closed form (see above).
+
+        Returns (bps, Bvals) in the same shape as _raylimit_limit: bps a 1-D
+        array of breakpoints in [0,1], Bvals shape (len(bps), n_active), or
+        (None, None) when nothing reacts."""
+        d = _selectivity_ray(y_active)
+        if d is None:
+            return None, None
+
+        reac = [i for i in range(n_active) if d[i] < -1e-12]
+        if not reac:
+            return None, None
+
+        kappa1_terms, kappa2_terms = [], []
+        for i in reac:
+            nu = -d[i]
+            y1i, y2i = rl_Y1a[i], rl_Y2a[i]
+            scale = 1e-9 * (abs(y1i) + abs(y2i) + 1.0)
+            pure1, pure2 = abs(y2i) < scale, abs(y1i) < scale
+            if pure1 and not pure2:
+                kappa1_terms.append(y1i / nu)
+            elif pure2 and not pure1:
+                kappa2_terms.append(y2i / nu)
+            else:
+                # Fed by both streams (or by neither) -- the closed form
+                # doesn't apply; refuse rather than fall back silently.
+                if not _mixed_feed_warned[0]:
+                    print(f"[Extend_2025]   [closed-form fs] species "
+                          f"{species_list[active_indices[i]]} is fed by both "
+                          f"streams; closed-form fs does not apply -- "
+                          f"refusing to compute a limit (rates set to 0).")
+                    _mixed_feed_warned[0] = True
+                return None, None
+
+        kappa1 = min(kappa1_terms) if kappa1_terms else None
+        kappa2 = min(kappa2_terms) if kappa2_terms else None
+        if kappa1 is None and kappa2 is None:
+            return None, None
+        if kappa2 is None:
+            fs, extent_fs = 0.0, 0.0
+        elif kappa1 is None:
+            fs, extent_fs = 1.0, 0.0
+        else:
+            fs = kappa2 / (kappa1 + kappa2)
+            extent_fs = fs * kappa1
+
+        bps = np.array([0.0, fs, 1.0])
+        Mfs = fs * rl_Y1a + (1.0 - fs) * rl_Y2a
+        Bvals = np.array([rl_Y2a, Mfs + extent_fs * d, rl_Y1a])
+        return bps, Bvals
+
+    def _rates_extend(alpha_t, beta_t, ab, a_over_ab, y_active):
+        bps, Bvals = _extend_closed_fs(y_active)
+        if bps is None:
+            info = {species_list[i]: (a_over_ab * (rl_Y1a[ai] - rl_Y2a[ai]) + rl_Y2a[ai],
+                                      0.0, 0.0, float(rl_Y2a[ai]),
+                                      float(0.5 * (rl_Y1a[ai] + rl_Y2a[ai])), float(rl_Y1a[ai]))
+                    for ai, i in enumerate(active_indices)}
+            return np.zeros(n_rxns), info
+
+        n_seg = len(bps) - 1
+        Bt = np.empty((_max_deg + 1, len(bps)))
+        for kk in range(_max_deg + 1):
+            Bt[kk] = betainc(alpha_t + kk, beta_t, bps)
+        rat = np.empty(_max_deg + 1)
+        rat[0] = 1.0
+        for d in range(1, _max_deg + 1):
+            rat[d] = rat[d - 1] * (alpha_t + (d - 1)) / (ab + (d - 1))
+
+        # Peak-extent breakpoint (for the single-kink diagnostic v0/vfs/v1).
+        Mbp = bps[:, None] * rl_Y1a[None, :] + (1 - bps)[:, None] * rl_Y2a[None, :]
+        peak = int(np.argmax(np.abs(Bvals - Mbp).sum(axis=1)))
+
+        # Per active species: C_i = B_i + (M_i - B_i)·λ; B_i piecewise-linear over
+        # bps, M_i the no-reaction line; λ = (y_i - E[B_i])/(E[M_i] - E[B_i])
+        # matches the mean so E[C_i]=y_i.
+        Cseg = {}
+        info = {}   # info[sp] = (E[B_i], raw λ, clamped λ, v0, vfs(peak), v1)
+        for ai, i in enumerate(active_indices):
+            sp = species_list[i]
+            mM = float(rl_Y1a[ai] - rl_Y2a[ai])
+            mB = float(rl_Y2a[ai])
+            e_M = mM * a_over_ab + mB
+            Bseg = []
+            e_B = 0.0
+            for s in range(n_seg):
+                fa, fb = bps[s], bps[s + 1]
+                if fb - fa < 1e-15:
+                    Bseg.append((0.0, 0.0))
+                    continue
+                ya, yb = float(Bvals[s, ai]), float(Bvals[s + 1, ai])
+                sl_ = (yb - ya) / (fb - fa)
+                it_ = ya - sl_ * fa
+                Bseg.append((sl_, it_))
+                e_B += (sl_ * a_over_ab * (Bt[1, s + 1] - Bt[1, s])
+                        + it_ * (Bt[0, s + 1] - Bt[0, s]))
+            yi = max(float(y_active[ai]), 0.0)
+            denom = e_M - e_B
+            lam0 = (yi - e_B) / denom if abs(denom) > 1e-9 * (abs(e_M) + abs(e_B) + 1.0) else 1.0
+            lam = min(1.0, max(0.0, lam0))
+            info[sp] = (e_B, lam0, lam, float(Bvals[0, ai]),
+                        float(Bvals[peak, ai]), float(Bvals[-1, ai]))
+            Cseg[sp] = [(lam * mM + (1 - lam) * sl_, lam * mB + (1 - lam) * it_)
+                        for (sl_, it_) in Bseg]
+
+        rates = np.zeros(n_rxns)
+        for j, reactants in enumerate(rxn_reactants):
+            if not reactants:
+                continue
+            r_j = 0.0
+            for s in range(n_seg):
+                if bps[s + 1] - bps[s] < 1e-15:
+                    continue
+                poly = np.array([k_vals[j]])
+                for i, order in reactants:
+                    s_i, b_i = Cseg[species_list[i]][s]
+                    for _ in range(order):
+                        poly = np.polymul(poly, np.array([s_i, b_i], dtype=float))
+                deg = len(poly) - 1
+                for kf, c in enumerate(poly):
+                    if abs(c) < 1e-300:
+                        continue
+                    d = deg - kf
+                    r_j += c * rat[d] * (Bt[d, s + 1] - Bt[d, s])
+            rates[j] = r_j
+        return rates, info
+
     # ── Rate computation (shared by RHS and post-solve recording) ────────
     def _rates_at(t, y_active, silent=False):
         var_t = mixing_variance(t, mean_f, m_epsilon)
@@ -3327,12 +3513,12 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         beta_t = (1.0 - mean_f) * s_t
         ab = alpha_t + beta_t
 
-        # Betainc table over all breakpoints: Btab[k, m] = I_{all_bps[m]}(alpha_t+k, beta_t).
+        # Betainc table over all breakpoints: Bt[k, m] = I_{all_bps[m]}(alpha_t+k, beta_t).
         # All segment integrals reduce to differences of these, so each distinct
         # (order, breakpoint) value is evaluated exactly once per step.
-        Btab = np.empty((_max_deg + 1, len(all_bps)))
+        Bt = np.empty((_max_deg + 1, len(all_bps)))
         for k in range(_max_deg + 1):
-            Btab[k] = betainc(alpha_t + k, beta_t, all_bps)
+            Bt[k] = betainc(alpha_t + k, beta_t, all_bps)
         # ratio[d] = prod_{k=0..d-1} (alpha_t+k)/(ab+k)
         ratio = np.empty(_max_deg + 1)
         ratio[0] = 1.0
@@ -3344,8 +3530,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         sp_ev = {}
         for ai, i in enumerate(active_indices):
             sp = species_list[i]
-            if sp in sp_pd:
-                sp_ev[sp] = _e_vals(sp, Btab, a_over_ab)
+            if sp in sp_profile_arrays:
+                sp_ev[sp] = _e_vals(sp, Bt, a_over_ab)
 
         if is_blendfs:
             if not blendfs_ok:
@@ -3362,12 +3548,18 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             _rb, _info = _rates_raylimit(alpha_t, beta_t, ab, a_over_ab, y_active)
             return _rb, _info, sp_ev
 
+        if is_extend and extend_ok:
+            # Extend_2025 also returns a per-species info dict (E[B], λ,
+            # single-kink v0/vfs/v1) in the sp_w slot for the recording/plotting loop.
+            _rb, _info = _rates_extend(alpha_t, beta_t, ab, a_over_ab, y_active)
+            return _rb, _info, sp_ev
+
         sp_w = {}
         for ai, i in enumerate(active_indices):
             sp = species_list[i]
-            if sp not in sp_pd:
+            if sp not in sp_profile_arrays:
                 continue
-            sp_w[sp] = _compute_cw_weights(sp_pl[sp], sp_ev[sp], max(float(y_active[ai]), 0.0),
+            sp_w[sp] = _compute_cw_weights(sp_profiles[sp], sp_ev[sp], max(float(y_active[ai]), 0.0),
                                            weight_method, species=sp, t=t, silent=silent)
 
         rates = np.zeros(n_rxns)
@@ -3384,7 +3576,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                     Mi, Bi = _seg_linear(sp, sp_w.get(sp, np.array([])), seg_k)
                     for _ in range(order):
                         prod_poly = np.polymul(prod_poly, np.array([Mi, Bi], dtype=float))
-                r_j += _poly_beta_int(prod_poly, Btab, ratio, seg_k, seg_k + 1)
+                r_j += _poly_beta_int(prod_poly, Bt, ratio, seg_k, seg_k + 1)
             rates[j] = r_j
         return rates, sp_w, sp_ev
 
@@ -3553,15 +3745,16 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     #       side of the mean.
     rates_out = np.empty((n_t, n_rxns))
     # Per-limit beta-averages over time: sp -> array (n_t, n_profiles).
-    limit_avgs = {sp: np.full((n_t, len(sp_pl[sp])), np.nan) for sp in sp_pl}
+    limit_avgs = {sp: np.full((n_t, len(sp_profiles[sp])), np.nan) for sp in sp_profiles}
     # blend_fs only: the time-varying per-subset blend weights, blended fs, and
     # the beta-averaged blended limit E[B_i] per species (for the averages plot).
     _bf_diag = (is_blendfs and blendfs_ok)
     _rl_diag = (is_raylimit and raylimit_ok)
+    _ext_diag = (is_extend and extend_ok)
     bf_w_t = np.full((n_t, bf_n), np.nan) if _bf_diag else None
     bf_fsb_t = np.full(n_t, np.nan)
-    # Shared across blend_fs and ray_limit: beta-averaged blended limit E[B_i].
-    blend_avgs = {sp: np.full(n_t, np.nan) for sp in sp_pl} if (_bf_diag or _rl_diag) else {}
+    # Shared across blend_fs, ray_limit, and Extend_2025: beta-averaged blended limit E[B_i].
+    blend_avgs = {sp: np.full(n_t, np.nan) for sp in sp_profiles} if (_bf_diag or _rl_diag or _ext_diag) else {}
     # Absolute-magnitude floor for the clamp tallies.  A clamp is only counted when
     # the mean falls outside the [E[M], E[B]] band by more than this amount — not
     # merely when the raw λ leaves [0,1] by a hair.  This suppresses trivial
@@ -3573,29 +3766,41 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     _clamp_atol = 1.0e-4 * float(max(np.asarray(Y1).max(), np.asarray(Y2).max(), 1.0))
     # blend_fs clamp tally: per species, # steps the mean fell below E[M] (pinned
     # to no-reaction) or above E[B] (pinned to the blended limit).
-    bf_clamp_lo = {sp: 0 for sp in sp_pl} if _bf_diag else {}
-    bf_clamp_hi = {sp: 0 for sp in sp_pl} if _bf_diag else {}
+    bf_clamp_lo = {sp: 0 for sp in sp_profiles} if _bf_diag else {}
+    bf_clamp_hi = {sp: 0 for sp in sp_profiles} if _bf_diag else {}
     # blend_fs: blend profile params per species over time [v0, vfs, v1, λ] (for
     # drawing the M / B / C curves on the snapshot plots).
-    bf_prof = {sp: np.full((n_t, 4), np.nan) for sp in sp_pl} if _bf_diag else {}
+    bf_prof = {sp: np.full((n_t, 4), np.nan) for sp in sp_profiles} if _bf_diag else {}
     # ray_limit diagnostics: the per-reaction selectivity used each step, the
     # time-varying complete-reaction fs, the per-species single-kink limit params
     # [v0, vfs, v1, λ] (for the snapshot M/B/C curves), and the same clamp tally.
     rl_sel_t = np.full((n_t, n_rxns), np.nan) if _rl_diag else None
     rl_fsb_t = np.full(n_t, np.nan) if _rl_diag else None
-    rl_prof = {sp: np.full((n_t, 4), np.nan) for sp in sp_pl} if _rl_diag else {}
-    rl_clamp_lo = {sp: 0 for sp in sp_pl} if _rl_diag else {}
-    rl_clamp_hi = {sp: 0 for sp in sp_pl} if _rl_diag else {}
+    rl_prof = {sp: np.full((n_t, 4), np.nan) for sp in sp_profiles} if _rl_diag else {}
+    ext_sel_t = np.full((n_t, n_rxns), np.nan) if _ext_diag else None
+    rl_clamp_lo = {sp: 0 for sp in sp_profiles} if _rl_diag else {}
+    rl_clamp_hi = {sp: 0 for sp in sp_profiles} if _rl_diag else {}
     # Full staged complete-reaction limit per output step: lists (length n_t) of
     # breakpoint arrays and B-value arrays (shape (len(bps), n_active)), or None.
     rl_limit_bps = [] if _rl_diag else None
     rl_limit_B = [] if _rl_diag else None
+    # Extend_2025 diagnostics: the time-varying single-kink fs (from the live
+    # extent direction), the per-species single-kink limit params
+    # [v0, vfs, v1, λ] (for the snapshot M/B/C curves), and the same clamp tally.
+    ext_fsb_t = np.full(n_t, np.nan) if _ext_diag else None
+    ext_prof = {sp: np.full((n_t, 4), np.nan) for sp in sp_profiles} if _ext_diag else {}
+    ext_clamp_lo = {sp: 0 for sp in sp_profiles} if _ext_diag else {}
+    ext_clamp_hi = {sp: 0 for sp in sp_profiles} if _ext_diag else {}
     # linear_interp clamp tally: per species, # steps the mean fell below the
     # lowest / above the highest subset-limit beta-average, so the bracket
     # interpolation pinned to an endpoint (E[C] != y there).
     _li_diag = (weight_method == 'linear_interp')
-    li_clamp_lo = {sp: 0 for sp in sp_pl} if _li_diag else {}
-    li_clamp_hi = {sp: 0 for sp in sp_pl} if _li_diag else {}
+    li_clamp_lo = {sp: 0 for sp in sp_profiles} if _li_diag else {}
+    li_clamp_hi = {sp: 0 for sp in sp_profiles} if _li_diag else {}
+    # linear_interp: per-species bracket weights over its candidate profiles at
+    # each output step (for reconstructing the blended C(f) = Σ w_n·profile_n(f)
+    # on the snapshot plots).
+    li_weights = {sp: np.full((n_t, len(sp_profiles[sp])), np.nan) for sp in sp_profiles} if _li_diag else {}
     jump_events = []  # (time, species) for each JUMP-type pair change
     continuous_events = []  # (time, species) for each CONTINUOUS pair change
     _prev_pairs = {}  # sp -> frozenset of active profile labels (previous step)
@@ -3622,6 +3827,9 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                 _Mbp = (_bps_k[:, None] * rl_Y1a[None, :]
                         + (1 - _bps_k)[:, None] * rl_Y2a[None, :])
                 rl_fsb_t[k] = float(_bps_k[int(np.argmax(np.abs(_Bv_k - _Mbp).sum(axis=1)))])
+            _rj_sum = float(rates_out[k].sum())
+            if _rj_sum > 1e-300:
+                rl_sel_t[k] = rates_out[k] / _rj_sum
 
             for sp, (e_B, lr, lam, v0, vfs, v1) in sp_w_k.items():   # ray_limit info
                 blend_avgs[sp][k] = e_B
@@ -3631,8 +3839,27 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                     rl_clamp_hi[sp] += 1
                 elif lr > 1.0 + 1e-9 and (lr - 1.0) * _band > _clamp_atol:
                     rl_clamp_lo[sp] += 1
+        if _ext_diag:
+            _bps_k, _Bv_k = _extend_closed_fs(y_full[k, active_indices])
+            if _bps_k is not None:                      # peak-extent f
+                _Mbp = (_bps_k[:, None] * rl_Y1a[None, :]
+                        + (1 - _bps_k)[:, None] * rl_Y2a[None, :])
+                ext_fsb_t[k] = float(_bps_k[int(np.argmax(np.abs(_Bv_k - _Mbp).sum(axis=1)))])
+            _rj_sum = float(rates_out[k].sum())
+            if _rj_sum > 1e-300:
+                ext_sel_t[k] = rates_out[k] / _rj_sum
+
+            for sp, (e_B, lr, lam, v0, vfs, v1) in sp_w_k.items():   # Extend_2025 info
+                blend_avgs[sp][k] = e_B
+                ext_prof[sp][k] = (v0, vfs, v1, lam)
+                _band = abs(e_B - y0_full[sp_to_global[sp]])   # |E[B]-E[M]|, E[M]=y0
+                if lr < -1e-9 and (-lr) * _band > _clamp_atol:
+                    ext_clamp_hi[sp] += 1
+                elif lr > 1.0 + 1e-9 and (lr - 1.0) * _band > _clamp_atol:
+                    ext_clamp_lo[sp] += 1
         if weight_method == 'linear_interp':
             for sp, w in sp_w_k.items():
+                li_weights[sp][k, :len(w)] = w
                 # Tally clamps: mean outside the [lowest, highest] profile-average
                 # range (mirrors the clamp in _compute_cw_weights; trivial near-zero
                 # means are skipped, as there the per-step warning is also suppressed).
@@ -3645,7 +3872,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                     elif _avg_sp > _emax + 1e-10 and (_avg_sp - _emax) > _clamp_atol:
                         li_clamp_hi[sp] += 1
                 active_idx = frozenset(
-                    sp_pl[sp][idx][0]
+                    sp_profiles[sp][idx][0]
                     for idx in np.where(w > 1e-10)[0]
                 )
                 prev = _prev_pairs.get(sp)
@@ -3654,7 +3881,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                     if _avg >= 0.0:
                         outgoing = prev - active_idx
                         incoming = active_idx - prev
-                        _lbl_e = {sp_pl[sp][i][0]: sp_ev_k[sp][i]
+                        _lbl_e = {sp_profiles[sp][i][0]: sp_ev_k[sp][i]
                                   for i in range(len(sp_ev_k[sp]))}
                         _side = lambda lbls: {int(np.sign(_lbl_e[l] - _avg))
                                               for l in lbls if l in _lbl_e}
@@ -3729,7 +3956,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     # blend_fs clamp summary: where the species mean left the [E[M], E[B]] band,
     # the interpolation pinned to a boundary (E[C] != y there).
     if _bf_diag:
-        _clamped = [sp for sp in sp_pl if bf_clamp_lo[sp] or bf_clamp_hi[sp]]
+        _clamped = [sp for sp in sp_profiles if bf_clamp_lo[sp] or bf_clamp_hi[sp]]
         if not _clamped:
             print(f"[{weight_method}]   [clamp] no species left the "
                   f"[no-reaction, blended-limit] band ({n_t} steps).")
@@ -3745,7 +3972,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     # ray_limit clamp summary: the inverse-distance blend is meant to keep the
     # mean inside the [E[M], E[B]] band, so this should normally report no clamping.
     if _rl_diag:
-        _clamped = [sp for sp in sp_pl if rl_clamp_lo[sp] or rl_clamp_hi[sp]]
+        _clamped = [sp for sp in sp_profiles if rl_clamp_lo[sp] or rl_clamp_hi[sp]]
         if not _clamped:
             print(f"[{weight_method}]   [clamp] no species left the "
                   f"[no-reaction, blended-limit] band ({n_t} steps).")
@@ -3758,11 +3985,27 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                       f"({100.0*hi/n_t:.0f}%), {lo} below no-reaction "
                       f"({100.0*lo/n_t:.0f}%)")
 
+    # Extend_2025 clamp summary: where the species mean left the [E[M], E[B]]
+    # band, the interpolation pinned to a boundary (E[C] != y there).
+    if _ext_diag:
+        _clamped = [sp for sp in sp_profiles if ext_clamp_lo[sp] or ext_clamp_hi[sp]]
+        if not _clamped:
+            print(f"[{weight_method}]   [clamp] no species left the "
+                  f"[no-reaction, blended-limit] band ({n_t} steps).")
+        else:
+            print(f"[{weight_method}]   [clamp] {n_t} output steps; mean outside "
+                  f"[E[M], E[B]] band by >{_clamp_atol:.2g} ->")
+            for sp in _clamped:
+                lo, hi = ext_clamp_lo[sp], ext_clamp_hi[sp]
+                print(f"[{weight_method}]     {sp}: {hi} step(s) above blended limit "
+                      f"({100.0*hi/n_t:.0f}%), {lo} below no-reaction "
+                      f"({100.0*lo/n_t:.0f}%)")
+
     # linear_interp clamp summary: where the species mean left the
     # [lowest-limit, highest-limit] profile-average range, the bracket
     # interpolation pinned to an endpoint (E[C] != y there).  Usually empty.
     if _li_diag:
-        _clamped = [sp for sp in sp_pl if li_clamp_lo[sp] or li_clamp_hi[sp]]
+        _clamped = [sp for sp in sp_profiles if li_clamp_lo[sp] or li_clamp_hi[sp]]
         if not _clamped:
             print(f"[{weight_method}]   [clamp] no species left the "
                   f"[lowest-limit, highest-limit] profile-average range ({n_t} steps).")
@@ -3812,14 +4055,16 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         'm_epsilon': m_epsilon,
         'solve_cpu_s': solve_cpu_s,
         'active_indices': active_indices,
+        'rxn_reactants': rxn_reactants,
+        'Y1': Y1,
+        'Y2': Y2,
         'weight_method': weight_method,
-        'sp_pl': sp_pl,
+        'sp_profiles': sp_profiles,
         'jump_events': jump_events,
         'jump_times': sorted({t for t, _ in jump_events}),
         'continuous_events': continuous_events,
         'limit_avgs': limit_avgs,
         'blend_avgs': blend_avgs,
-        'blend_clamp': blend_clamp,
         'method_ran': not (is_blendfs and not blendfs_ok),
     }
     if _bf_diag:
@@ -3828,7 +4073,6 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             'w': bf_w_t, 'fsb': bf_fsb_t, 'prof': bf_prof,
             'Y1': Y1, 'Y2': Y2,
             'clamp_below_M': dict(bf_clamp_lo), 'clamp_above_B': dict(bf_clamp_hi),
-            'c0': bf_c0, 'sub_cfs': bf_cfs, 'c1': bf_c1,
         }
     if _rl_diag:
         out['raylimit'] = {
@@ -3836,11 +4080,18 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             'Y1': Y1, 'Y2': Y2, 'limit_bps': rl_limit_bps, 'limit_B': rl_limit_B,
             'clamp_below_M': dict(rl_clamp_lo), 'clamp_above_B': dict(rl_clamp_hi),
         }
+    if _ext_diag:
+        out['extend2025'] = {
+            'rxn_labels': rxn_labels, 'sel': ext_sel_t, 'fsb': ext_fsb_t, 'prof': ext_prof,
+            'Y1': Y1, 'Y2': Y2,
+            'clamp_below_M': dict(ext_clamp_lo), 'clamp_above_B': dict(ext_clamp_hi),
+        }
     if _li_diag:
         out['li_clamps'] = {
             'clamp_below_min': dict(li_clamp_lo),
             'clamp_above_max': dict(li_clamp_hi),
         }
+        out['li_weights'] = li_weights
     return out
 
 
@@ -3934,7 +4185,7 @@ def plot_ode_limit_averages(ode_result, save_stem=None):
     active_indices = ode_result.get('active_indices', np.arange(len(species_list)))
     limit_avgs = ode_result.get('limit_avgs', {})
     blend_avgs = ode_result.get('blend_avgs', {})  # blend_fs: E[B_i] over time
-    sp_pl = ode_result['sp_pl']
+    sp_profiles = ode_result['sp_profiles']
     t = ode_result['t']
     m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
     mean_f = ode_result['mean_f']
@@ -3959,16 +4210,17 @@ def plot_ode_limit_averages(ode_result, save_stem=None):
         row, col = divmod(plot_idx, n_cols)
         ax = axes[row][col]
         avgs = limit_avgs[sp]                  # (n_t, n_profiles)
-        labels = [lbl for lbl, _ in sp_pl[sp]]
+        labels = [lbl for lbl, _ in sp_profiles[sp]]
         n_profiles = avgs.shape[1]
         sp_idx = species_list.index(sp)
         y_sp = ode_result['y'][:, sp_idx]
 
         # Which profiles to highlight (bold) at each timestep.
         active_mask = np.zeros((len(t), n_profiles), dtype=bool)
-        if 'blendfs' in ode_result or 'raylimit' in ode_result:
-            # blend_fs / ray_limit interpolate only between the no-reaction limit
-            # and the blend (the E[B] line), so bold only the no-reaction limit.
+        if 'blendfs' in ode_result or 'raylimit' in ode_result or 'extend2025' in ode_result:
+            # blend_fs / ray_limit / Extend_2025 interpolate only between the
+            # no-reaction limit and the blend (the E[B] line), so bold only
+            # the no-reaction limit.
             noreac = next((j for j, l in enumerate(labels)
                            if '0' in str(l).split('_')), None)
             if noreac is not None:
@@ -3988,7 +4240,8 @@ def plot_ode_limit_averages(ode_result, save_stem=None):
             ax.plot(t, y_bold, lw=2.5, color=color)
         # beta-averaged complete-reaction limit E[B_i] — black solid (drawn first / underneath)
         if sp in blend_avgs:
-            _elbl = 'ray limit E[B]' if weight_method == 'ray_limit' else 'blended limit E[B]'
+            _elbl = {'ray_limit': 'ray limit E[B]',
+                     'Extend_2025': 'Extend_2025 E[B]'}.get(weight_method, 'blended limit E[B]')
             ax.plot(t, blend_avgs[sp], lw=2.4, color='black', ls='-',
                     label=_elbl, zorder=5)
         # blended species average C_i(t) — red, drawn on top with a wide dash so it
@@ -4046,8 +4299,8 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
     weight_method = ode_result.get('weight_method', 'linear_interp')
     species_list = ode_result['species']
 
-    sp_pl = ode_result['sp_pl']
-    active_species = [species_list[i] for i in active_indices if species_list[i] in sp_pl]
+    sp_profiles = ode_result['sp_profiles']
+    active_species = [species_list[i] for i in active_indices if species_list[i] in sp_profiles]
     n_sp = len(active_species)
     if n_sp == 0:
         return
@@ -4070,7 +4323,8 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
         return mixing_variance(t_snap, mean_f, m_epsilon)
 
     _bf = ode_result.get('blendfs')        # blend_fs: draw M/B/C curves per cell
-    _bd = ode_result.get('raylimit')      # ray_limit: draw M/B/C curves per cell
+    _rl = ode_result.get('raylimit')      # ray_limit: draw M/B/C curves per cell
+    _ex = ode_result.get('extend2025')    # Extend_2025: draw M/B/C curves per cell
     _bf_fgrid = np.linspace(0.0, 1.0, 200)
 
     ncols = 4
@@ -4080,7 +4334,7 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
 
     for row, sp in enumerate(active_species):
         sp_global_idx = species_list.index(sp)
-        profiles = dict(sp_pl[sp])
+        profiles = dict(sp_profiles[sp])
         profile_list = list(profiles.items())
         colors = [_tab_palette[i % len(_tab_palette)] for i in range(len(profile_list))]
 
@@ -4102,21 +4356,30 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
                     float(_bf['Y2'][sp_global_idx]) * (1.0 - _bf_fgrid)
                 _draw_blendfs_cell(ax, cell_title, _bf_fgrid, Mi, v0, vfs, v1, fsb, lam,
                                    alpha_t, beta_t, average_val, xlim=f_xlim)
-            elif _bd is not None and sp in _bd['prof']:
+            elif _rl is not None and sp in _rl['prof']:
                 # ray_limit: draw the FULL staged complete-reaction limit B(f)
                 # (multi-segment for catalytic systems) and C(f)=B+(M-B)·λ.
-                v0, vfs, v1, lam = _bd['prof'][sp][t_idx]
-                fsb = float(_bd['fsb'][t_idx])
-                Mi = float(_bd['Y1'][sp_global_idx]) * _bf_fgrid + \
-                    float(_bd['Y2'][sp_global_idx]) * (1.0 - _bf_fgrid)
+                v0, vfs, v1, lam = _rl['prof'][sp][t_idx]
+                fsb = float(_rl['fsb'][t_idx])
+                Mi = float(_rl['Y1'][sp_global_idx]) * _bf_fgrid + \
+                    float(_rl['Y2'][sp_global_idx]) * (1.0 - _bf_fgrid)
                 _bprof = None
-                _bps_t = _bd.get('limit_bps', [None] * (t_idx + 1))[t_idx]
+                _bps_t = _rl.get('limit_bps', [None] * (t_idx + 1))[t_idx]
                 if _bps_t is not None and sp_global_idx in list(active_indices):
                     _ai_pos = list(active_indices).index(sp_global_idx)
-                    _bprof = (_bps_t, _bd['limit_B'][t_idx][:, _ai_pos])
+                    _bprof = (_bps_t, _rl['limit_B'][t_idx][:, _ai_pos])
                 _draw_blendfs_cell(ax, cell_title, _bf_fgrid, Mi, v0, vfs, v1, fsb, lam,
                                    alpha_t, beta_t, average_val, xlim=f_xlim,
                                    fs_label='fs_ray', B_profile=_bprof)
+            elif _ex is not None and sp in _ex['prof']:
+                # Extend_2025: single-kink hypercube blend, same M/B/C rendering as blend_fs.
+                v0, vfs, v1, lam = _ex['prof'][sp][t_idx]
+                fsb = float(_ex['fsb'][t_idx])
+                Mi = float(_ex['Y1'][sp_global_idx]) * _bf_fgrid + \
+                    float(_ex['Y2'][sp_global_idx]) * (1.0 - _bf_fgrid)
+                _draw_blendfs_cell(ax, cell_title, _bf_fgrid, Mi, v0, vfs, v1, fsb, lam,
+                                   alpha_t, beta_t, average_val, xlim=f_xlim,
+                                   fs_label='fs_ext')
             else:
                 _draw_cw_cell(ax, cell_title, profiles, alpha_t, beta_t,
                               average_val, weight_method, colors, t=t_snap, xlim=f_xlim)
@@ -4147,12 +4410,9 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
         for col in range(ncols):
             axes[row][col].set_ylim(row_ymin, row_ymax)
 
-    _uc_note = ''
-    if weight_method in ('blend_fs', 'blend_auto') and not ode_result.get('blend_clamp', True):
-        _uc_note = '  [UNCLAMPED]'
     fig.suptitle(
         f'C_w(f) snapshots along ODE  (mean_f={mean_f:.4f},  '
-        f'var {var_start:.4f}→{var_end:.2e}  (ε={m_epsilon:.4g}, τ_s={mixing_timescale(m_epsilon):.4g} s),  weights={weight_method}{_uc_note})',
+        f'var {var_start:.4f}→{var_end:.2e}  (ε={m_epsilon:.4g}, τ_s={mixing_timescale(m_epsilon):.4g} s),  weights={weight_method})',
         fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
@@ -4397,9 +4657,8 @@ def plot_blendfs_diagnostics(ode_result, save_stem=None):
     # Legend below the axes so it never overlaps the fs end-point annotations.
     ax.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper center',
               bbox_to_anchor=(0.5, -0.12), ncol=min(3, len(l1) + len(l2)))
-    _uc_note = '  [UNCLAMPED]' if not ode_result.get('blend_clamp', True) else ''
     ax.set_title(f'blend_fs: {n} one-short limits — weights & blended fs vs time  '
-                 f'(ε={m_epsilon:.4g}){_uc_note}', fontsize=10)
+                 f'(ε={m_epsilon:.4g})', fontsize=10)
     fig.tight_layout()
 
     if save_stem is not None:
@@ -4431,17 +4690,17 @@ def _annotate_fs_endpoints(ax, t, fsb):
 
 
 def plot_raylimit_diagnostics(ode_result, save_stem=None):
-    """For a ray_limit ODE run, plot the time-varying reaction selectivity (the
-    normalized current rates that shape the limit, left axis) and the resulting
-    complete-reaction fs (right axis)."""
+    """For a ray_limit ODE run, plot the time-varying reaction selectivity (each
+    reaction's share of the total Beta-integrated rate, left axis) and the
+    resulting complete-reaction fs (right axis)."""
     import pathlib as _pathlib
 
-    bd = ode_result.get('raylimit')
-    if bd is None:
+    rl = ode_result.get('raylimit')
+    if rl is None:
         return
     t = ode_result['t']
     m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
-    labels, sel = bd['rxn_labels'], bd['sel']
+    labels, sel = rl['rxn_labels'], rl['sel']
     n = len(labels)
     _tab = _build_tab_palette()
     colors = [_tab[i % len(_tab)] for i in range(n)]
@@ -4450,13 +4709,13 @@ def plot_raylimit_diagnostics(ode_result, save_stem=None):
     for k in range(n):
         ax.plot(t, sel[:, k], color=colors[k], lw=1.8, label=f"selectivity {labels[k]}")
     ax.set_xlabel('t (s)', fontsize=9)
-    ax.set_ylabel('reaction selectivity (normalized current rate)', fontsize=9)
+    ax.set_ylabel('reaction selectivity (normalized Beta-integrated rate)', fontsize=9)
     ax.set_ylim(-0.02, 1.02)
     ax.grid(True, alpha=0.3)
 
     ax2 = ax.twinx()
-    ax2.plot(t, bd['fsb'], color='black', lw=2.0, label='fs (complete-reaction)')
-    _annotate_fs_endpoints(ax2, t, bd['fsb'])
+    ax2.plot(t, rl['fsb'], color='black', lw=2.0, label='fs (complete-reaction)')
+    _annotate_fs_endpoints(ax2, t, rl['fsb'])
     ax2.set_ylabel('fs', fontsize=9)
 
     h1, l1 = ax.get_legend_handles_labels()
@@ -4470,6 +4729,51 @@ def plot_raylimit_diagnostics(ode_result, save_stem=None):
 
     if save_stem is not None:
         _save_fig(fig, save_stem, f'{_pathlib.Path(save_stem).name}_raylimit_diag.png')
+    else:
+        plt.show()
+
+
+def plot_extend2025_diagnostics(ode_result, save_stem=None):
+    """For an Extend_2025 ODE run, plot the time-varying reaction selectivity (each
+    reaction's share of the total Beta-integrated rate, left axis) and the
+    resulting complete-reaction fs (right axis).  Mirrors
+    :func:`plot_raylimit_diagnostics`."""
+    import pathlib as _pathlib
+
+    ext = ode_result.get('extend2025')
+    if ext is None:
+        return
+    t = ode_result['t']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    labels, sel = ext['rxn_labels'], ext['sel']
+    n = len(labels)
+    _tab = _build_tab_palette()
+    colors = [_tab[i % len(_tab)] for i in range(n)]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for k in range(n):
+        ax.plot(t, sel[:, k], color=colors[k], lw=1.8, label=f"selectivity {labels[k]}")
+    ax.set_xlabel('t (s)', fontsize=9)
+    ax.set_ylabel('reaction selectivity (normalized Beta-integrated rate)', fontsize=9)
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(True, alpha=0.3)
+
+    ax2 = ax.twinx()
+    ax2.plot(t, ext['fsb'], color='black', lw=2.0, label='fs (complete-reaction)')
+    _annotate_fs_endpoints(ax2, t, ext['fsb'])
+    ax2.set_ylabel('fs', fontsize=9)
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    # Legend below the axes so it never overlaps the fs end-point annotations.
+    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper center',
+              bbox_to_anchor=(0.5, -0.12), ncol=min(4, len(l1) + len(l2)))
+    ax.set_title(f'Extend_2025: rate-selectivity & complete-reaction fs vs time  '
+                 f'(ε={m_epsilon:.4g})', fontsize=10)
+    fig.tight_layout()
+
+    if save_stem is not None:
+        _save_fig(fig, save_stem, f'{_pathlib.Path(save_stem).name}_Extend_2025_diag.png')
     else:
         plt.show()
 
@@ -4664,9 +4968,8 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
         axes[i // ncols][i % ncols].set_visible(False)
 
     _bs_note = f'  blend_subsets={list(blend_subsets)}' if blend_subsets is not None else ''
-    _uc_note = '  [UNCLAMPED]' if not ode_result.get('blend_clamp', True) else ''
     fig.suptitle('blend_fs blended complete-reaction limit B(f) by snapshot time  '
-                 f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g}{_bs_note}{_uc_note})\n'
+                 f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g}{_bs_note})\n'
                  'solid = control-point approx  ·  grey ·· = individual subset kinks  ·  black ·· = fsb',
                  fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
@@ -4679,31 +4982,153 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
         plt.show()
 
 
+def plot_extend2025_limit_grid(ode_result, save_stem=None):
+    """Extend_2025 only: the extent-weighted complete-reaction limit B(f), laid
+    out exactly like :func:`plot_blendfs_limit_grid` — all species' coloured
+    profiles overlaid on a single axes, one subplot per snapshot time.
+
+    Extend_2025's per-species limit is the single-kink profile (v0 at f=0, vfs at
+    fs, v1 at f=1) recorded each step in ``ode_result['extend2025']['prof']`` —
+    a single LP solve on the live extent-weighted reaction system, not a blend
+    of several corners, so there's only one kink per step (no per-corner grey
+    lines to draw).  Uses the SAME species→colour mapping, stream-split
+    (stream-1 species on a twin axis) and `/20` scaling as the blend_fs/ray_limit
+    grids, so all three read alike.  The four times match the beta snapshots
+    (first near 1/96 of t_end)."""
+    import pathlib as _pathlib
+
+    ext = ode_result.get('extend2025')
+    if ext is None or not ext.get('prof'):
+        return
+    t = np.asarray(ode_result['t'])
+    species_list = ode_result['species']
+    active_indices = list(ode_result['active_indices'])
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    mean_f = ode_result['mean_f']
+    Y1, Y2 = np.asarray(ext['Y1']), np.asarray(ext['Y2'])
+    fsb = np.asarray(ext['fsb'], dtype=float)
+    prof = ext['prof']
+    # Only species that carry a blend profile have a B(f); plot those.
+    plotted = [s for s in active_indices if species_list[s] in prof]
+    if not plotted:
+        return
+
+    # Snapshot times (match plot_ode_beta_snapshots): first near 1/96 of t_end.
+    T = float(t[-1] - t[0])
+    targets = np.linspace(t[0], t[-1], 4)
+    targets[0] = t[0] + T / 96.0
+    idxs = sorted(int(np.argmin(np.abs(t - tt))) for tt in targets)
+    fg = np.linspace(0.0, 1.0, 400)
+
+    # Species→colour: based on global species index so colour is consistent across plots.
+    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
+    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    stream_labels = identify_stream_feeds(Y1, Y2)
+    s1 = [s for s in plotted if stream_labels[s] in (1, 12)]   # twin (right) axis
+    s2 = [s for s in plotted if stream_labels[s] not in (1, 12)]
+
+    def _Bcurve(k, s):
+        v0, vfs, v1, _lam = prof[species_list[s]][k]
+        fsk = fsb[k]
+        if not np.isfinite(v0) or not np.isfinite(fsk) or not (0.0 < fsk < 1.0):
+            return np.zeros_like(fg)
+        return np.where(fg <= fsk,
+                        v0 + (vfs - v0) * (fg / fsk),
+                        vfs + (v1 - vfs) * (fg - fsk) / (1.0 - fsk))
+
+    # `/20` scaling for any species whose max dwarfs every other (e.g. solvent).
+    gmax = {s: max(float(np.max(np.abs(_Bcurve(k, s)))) for k in idxs) for s in plotted}
+    scale_div20 = set()
+    for s in plotted:
+        others = max((gmax[o] for o in plotted if o != s), default=0.0)
+        if others > 1e-12 and gmax[s] > 20.0 * others:
+            scale_div20.add(s)
+    _lbl = lambda s: species_list[s] + '/20' if s in scale_div20 else species_list[s]
+    _yv = lambda s, arr: arr / 20.0 if s in scale_div20 else arr
+
+    nrows, ncols = 2, 2
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.0 * ncols, 4.5 * nrows),
+                             squeeze=False)
+    fr2 = np.linspace(0.15, 0.85, max(len(s2), 1))
+    fr1 = np.linspace(0.15, 0.85, max(len(s1), 1))
+    for i, k in enumerate(idxs):
+        ax = axes[i // ncols][i % ncols]
+        for s in s2:
+            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
+        _annotate_species_lines(ax, fg,
+            [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s2], fr2)
+        if s1:
+            ax_r = ax.twinx()
+            for s in s1:
+                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
+            _annotate_species_lines(ax_r, fg,
+                [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s1], fr1)
+            ax_r.tick_params(axis='y', labelsize=6)
+        fsk = float(fsb[k]) if np.isfinite(fsb[k]) else None
+        ttl = f't = {t[k]:.4g} s'
+        if fsk is not None and 0.0 < fsk < 1.0:
+            ttl += f'   (fs_b ≈ {fsk:.4f})'
+            ax.axvline(fsk, color='k', linestyle=':', alpha=0.5)
+        ax.set_title(ttl, fontsize=9)
+        ax.set_xlabel('f', fontsize=8)
+        ax.grid(True, alpha=0.3)
+    for i in range(len(idxs), nrows * ncols):
+        axes[i // ncols][i % ncols].set_visible(False)
+
+    fig.suptitle('Extend_2025 extent-weighted complete-reaction limit B(f) by snapshot time  '
+                 f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g})\n'
+                 'solid = control-point approx  ·  black ·· = fs',
+                 fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_stem is not None:
+        _wm = ode_result.get('weight_method', 'Extend_2025')
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_{_wm}_limit_grid.png')
+    else:
+        plt.show()
+
+
+
+def _eval_profile_array(bps, segs, f_arr):
+    """Evaluate a piecewise-linear profile (breakpoints ``bps``, per-segment
+    ``[slope, intercept]`` rows ``segs``) at an array of f values."""
+    bps = np.asarray(bps, dtype=float)
+    segs = np.asarray(segs, dtype=float)
+    idx = np.clip(np.searchsorted(bps, f_arr, side='right') - 1, 0, len(segs) - 1)
+    return segs[idx, 0] * f_arr + segs[idx, 1]
+
 
 def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
     """C(f) closure profiles for reactant species of each reaction.
 
     Layout: rows = reactions, columns = 4 snapshot times (same as
     plot_ode_beta_snapshots).  Each cell shows C_i(f) for every reactant of
-    that reaction with the Beta PDF overlaid.  Supported for blend_fs,
-    blend_auto, and ray_limit; returns silently for other methods.
+    that reaction with the rate integrand overlaid.  Supported for blend_fs,
+    ray_limit, Extend_2025, and linear_interp; returns silently for other
+    methods.
     """
     import pathlib as _pathlib
 
     weight_method = ode_result.get('weight_method', '')
-    if weight_method in ('blend_fs', 'blend_auto'):
+    is_li = weight_method == 'linear_interp'
+    if weight_method == 'blend_fs':
         diag = ode_result.get('blendfs')
     elif weight_method == 'ray_limit':
         diag = ode_result.get('raylimit')
+    elif weight_method == 'Extend_2025':
+        diag = ode_result.get('extend2025')
+    elif is_li:
+        diag = ode_result.get('li_weights')
     else:
         return
     if diag is None:
         return
+    sp_profiles = ode_result.get('sp_profiles', {}) if is_li else None
 
     meta = unique_sp_data['meta']
     species_list = meta['species']
     rxns = meta['reactions']
-    nu_reactants, _ = parse_reactions(rxns, species_list)
     rxn_labels = [r.split(':')[0].strip() for r in rxns]
     n_rxns = len(rxn_labels)
 
@@ -4714,7 +5139,33 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
     m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
     max_var = mean_f * (1.0 - mean_f)
 
-    nu_r_active = nu_reactants[active_indices, :]  # (n_active, n_rxns)
+    # Rate-law order per (species, reaction) — NOT the raw stoichiometric
+    # coefficient; matches the order actually used by the ODE integration
+    # (default 1, unless the reaction is `elementary` or the JSON supplies
+    # explicit `orders`).
+    rxn_reactants = ode_result['rxn_reactants']
+    global_to_active = {int(i): pos for pos, i in enumerate(active_indices)}
+    order_lookup = [
+        {global_to_active[i]: order for i, order in rxn_reactants[j] if i in global_to_active}
+        for j in range(n_rxns)
+    ]
+
+    # Per-species display scale for the C(f) curves (main axis only — the rate
+    # integrand keeps the true, unscaled concentrations): a fed species is
+    # scaled by its own (nonzero) feed concentration; an unfed product has no
+    # feed of its own, so it's scaled by the smallest nonzero stream-2 feed.
+    Y1_arr = np.asarray(ode_result['Y1'], dtype=float)
+    Y2_arr = np.asarray(ode_result['Y2'], dtype=float)
+    _y2_pos = Y2_arr[Y2_arr > 0]
+    stream2_min = float(_y2_pos.min()) if _y2_pos.size else 1.0
+
+    def _display_scale(sp_global):
+        y1_i, y2_i = float(Y1_arr[sp_global]), float(Y2_arr[sp_global])
+        if y1_i > 0:
+            return y1_i
+        if y2_i > 0:
+            return y2_i
+        return stream2_min
 
     # Snapshot times matching plot_ode_beta_snapshots
     _T = float(t_arr[-1] - t_arr[0])
@@ -4732,7 +5183,8 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
                              figsize=(4.0 * n_cols, 3.0 * n_rxns), squeeze=False)
 
     for row, (j, lbl) in enumerate(zip(range(n_rxns), rxn_labels)):
-        reactant_pos = np.where(nu_r_active[:, j] > 0)[0]
+        reactant_pos = np.array(sorted(order_lookup[j]), dtype=int)
+        row_axpdf = []   # (ax_pdf, rig_max) pairs — shared secondary-axis scale across the row
         for col, (t_idx, t_label) in enumerate(zip(snap_idxs, snap_labels)):
             ax = axes[row][col]
             t_snap = float(t_arr[t_idx])
@@ -4744,17 +5196,43 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
             beta_t  = (1.0 - mean_f) * s_t
             pdf_vals = _stats.beta.pdf(f_pdf, alpha_t, beta_t)
 
-            fsb = float(diag['fsb'][t_idx])
-            if not (np.isfinite(fsb) and 0.0 < fsb < 1.0):
-                fsb = 0.5
+            if not is_li:
+                fsb = float(diag['fsb'][t_idx])
+                if not (np.isfinite(fsb) and 0.0 < fsb < 1.0):
+                    fsb = 0.5
 
-            reactant_Cf_pdf = {}  # sp_pos -> (Cf_on_f_pdf, stoich_order)
+            reactant_Cf_pdf = {}  # sp_pos -> (Cf_on_f_pdf, rate_order)
+            cf_max = None   # overall max C(f) in this subplot, for the log y-axis
             for sp_pos in reactant_pos:
                 sp = active_species[sp_pos]
                 sp_global = int(active_indices[sp_pos])
+                color = _sp_color(sp_global, species_list, _colors)
+
+                if is_li:
+                    if sp not in sp_profiles or sp not in diag:
+                        continue
+                    w = diag[sp][t_idx]
+                    profiles = sp_profiles[sp]
+                    C_f = np.zeros_like(f_grid)
+                    C_fp = np.zeros_like(f_pdf)
+                    for n, (_lbl_n, prof_n) in enumerate(profiles):
+                        wn = float(w[n]) if n < len(w) else 0.0
+                        if not np.isfinite(wn) or wn == 0.0:
+                            continue
+                        bps_n, segs_n = prof_n['breakpoints'], prof_n['segments']
+                        if not bps_n or not segs_n:
+                            continue
+                        C_f += wn * _eval_profile_array(bps_n, segs_n, f_grid)
+                        C_fp += wn * _eval_profile_array(bps_n, segs_n, f_pdf)
+                    scale = _display_scale(sp_global)
+                    ax.plot(f_grid, C_f / scale, color=color, lw=1.8, label=sp)
+                    _cf_max = float(np.nanmax(C_f)) / scale
+                    cf_max = _cf_max if cf_max is None else max(cf_max, _cf_max)
+                    reactant_Cf_pdf[sp_pos] = (C_fp, order_lookup[j][sp_pos])
+                    continue
+
                 if sp not in diag.get('prof', {}):
                     continue
-                color = _sp_color(sp_global, species_list, _colors)
                 Y1_i = float(diag['Y1'][sp_global])
                 Y2_i = float(diag['Y2'][sp_global])
                 v0, vfs, v1, lam = diag['prof'][sp][t_idx]
@@ -4765,47 +5243,54 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
                                v0 + (vfs - v0) * f_grid / fsb,
                                vfs + (v1 - vfs) * (f_grid - fsb) / (1.0 - fsb))
                 C_f = B_f + (M_f - B_f) * lam
-                ax.plot(f_grid, C_f, color=color, lw=1.8, label=sp)
+                scale = _display_scale(sp_global)
+                ax.plot(f_grid, C_f / scale, color=color, lw=1.8, label=sp)
+                _cf_max = float(np.nanmax(C_f)) / scale
+                cf_max = _cf_max if cf_max is None else max(cf_max, _cf_max)
                 # C(f) on f_pdf for the rate integrand
                 M_fp = f_pdf * Y1_i + (1.0 - f_pdf) * Y2_i
                 B_fp = np.where(f_pdf <= fsb,
                                 v0 + (vfs - v0) * f_pdf / fsb,
                                 vfs + (v1 - vfs) * (f_pdf - fsb) / (1.0 - fsb))
                 reactant_Cf_pdf[sp_pos] = (B_fp + (M_fp - B_fp) * lam,
-                                           int(nu_r_active[sp_pos, j]))
+                                           order_lookup[j][sp_pos])
 
-            # Rate integrand: β(f) × ∏ C_i(f)^ν_i, scaled to PDF peak
+            # Rate integrand: β-PDF(f) × ∏ C_i(f)^order_i (no rescaling; row-shared axis)
             ax_pdf = ax.twinx()
-            ax_pdf.plot(f_pdf, pdf_vals, color='lightgrey', lw=1.0, zorder=0)
+            rig_max = 0.0
             if reactant_Cf_pdf:
-                rate_ig = np.ones_like(f_pdf)
-                for Cf_p, nu in reactant_Cf_pdf.values():
-                    rate_ig *= np.maximum(Cf_p, 0.0) ** nu
-                rate_ig_w = pdf_vals * rate_ig
-                _rig_max = rate_ig_w.max()
-                _pdf_max = pdf_vals.max()
-                if _rig_max > 0 and _pdf_max > 0:
-                    ax_pdf.plot(f_pdf, rate_ig_w * (_pdf_max / _rig_max),
-                                color='tab:orange', lw=1.2, ls='--', zorder=0)
-            ax_pdf.set_ylabel('β-PDF  /  β·∏C  (scaled)', fontsize=7, color='grey')
+                rate_ig = pdf_vals.copy()
+                for Cf_p, order in reactant_Cf_pdf.values():
+                    rate_ig *= np.maximum(Cf_p, 0.0) ** order
+                ax_pdf.plot(f_pdf, rate_ig, color='tab:orange', lw=1.2, ls='--', zorder=0)
+                rig_max = float(rate_ig.max())
+            ax_pdf.set_ylabel('β-PDF·∏C', fontsize=7, color='grey')
             ax_pdf.tick_params(axis='y', labelcolor='grey', labelsize=6)
             ax_pdf.set_ylim(bottom=0)
+            row_axpdf.append((ax_pdf, rig_max))
             ax.set_zorder(ax_pdf.get_zorder() + 1)
             ax.patch.set_visible(False)
+
+            if cf_max is not None and cf_max > 0:
+                ax.set_ylim(0, cf_max * 1.05)
 
             ax.axvline(mean_f, color='gray', lw=0.8, ls=':', alpha=0.7)
             ax.set_title(f'{lbl}  {t_label}', fontsize=9)
             ax.set_xlabel('f', fontsize=8)
-            ax.set_ylabel('C(f)  (mol/m³)', fontsize=8)
+            ax.set_ylabel('C(f) / feed scale', fontsize=8)
             ax.tick_params(labelsize=7)
             ax.grid(True, alpha=0.3)
             if reactant_pos.size > 0:
                 ax.legend(fontsize=7, loc='best')
 
-    _uc = '  [UNCLAMPED]' if not ode_result.get('blend_clamp', True) else ''
+        row_max = max((m for _, m in row_axpdf), default=0.0)
+        if row_max > 0:
+            for ax_pdf, _ in row_axpdf:
+                ax_pdf.set_ylim(0, row_max * 1.05)
+
     fig.suptitle(
         f'C(f) reactant profiles per reaction  '
-        f'(ε={m_epsilon:.4g},  mean_f={mean_f:.4f},  {weight_method}{_uc})',
+        f'(ε={m_epsilon:.4g},  mean_f={mean_f:.4f},  {weight_method})',
         fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
@@ -4824,7 +5309,7 @@ def _clamp_total(res):
         lc = res.get('li_clamps', {})
         return (sum(lc.get('clamp_below_min', {}).values())
                 + sum(lc.get('clamp_above_max', {}).values()))
-    if wm in ('blend_fs', 'blend_auto'):
+    if wm == 'blend_fs':
         bf = res.get('blendfs', {})
         return (sum(bf.get('clamp_below_M', {}).values())
                 + sum(bf.get('clamp_above_B', {}).values()))
@@ -4832,32 +5317,11 @@ def _clamp_total(res):
         rl = res.get('raylimit', {})
         return (sum(rl.get('clamp_below_M', {}).values())
                 + sum(rl.get('clamp_above_B', {}).values()))
+    if wm == 'Extend_2025':
+        ext = res.get('extend2025', {})
+        return (sum(ext.get('clamp_below_M', {}).values())
+                + sum(ext.get('clamp_above_B', {}).values()))
     return 0
-
-
-def save_ode_trajectories_csv(ode_result, save_stem):
-    """Save ODE species concentration trajectories to CSV.
-
-    Columns: t (s), then one column per active species in mol/m³.
-    File is named <save_stem>_ode_<weight_method>.csv."""
-    import pathlib as _pathlib
-    import csv as _csv
-
-    t = ode_result['t']
-    y = ode_result['y']
-    species_list = ode_result['species']
-    active_indices = ode_result['active_indices']
-    active_species = [species_list[i] for i in active_indices]
-    weight_method = ode_result.get('weight_method', 'unknown')
-
-    stem = _pathlib.Path(save_stem)
-    path = stem.parent / f'{stem.name}_ode_{weight_method}.csv'
-    with open(path, 'w', newline='') as fh:
-        writer = _csv.writer(fh)
-        writer.writerow(['t (s)'] + [f'{sp} (mol/m3)' for sp in active_species])
-        for k in range(len(t)):
-            writer.writerow([t[k]] + [float(y[k, i]) for i in active_indices])
-    print(f"[{weight_method}]   ODE trajectories saved to {path}")
 
 
 def save_ios_csv(mean_f, m_epsilon, t_end, save_stem, n_pts=500):
@@ -4874,7 +5338,9 @@ def save_ios_csv(mean_f, m_epsilon, t_end, save_stem, n_pts=500):
     ios_vals = _np.array([mixing_variance(t, mean_f, m_epsilon) / max_var for t in t_vals])
 
     stem = _pathlib.Path(save_stem)
-    path = stem.parent / f'{stem.name}_ios.csv'
+    plots_dir = stem.parent / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    path = plots_dir / f'{stem.name}_ios.csv'
     with open(path, 'w', newline='') as fh:
         writer = _csv.writer(fh)
         writer.writerow(['t (s)', 'I_s'])
@@ -4998,8 +5464,8 @@ if __name__ == '__main__':
 
     # Weighting methods to run.  The JSON key 'weight_methods' accepts a list of
     # integer codes; omit it (or set it to [1,2,3]) to get the three defaults.
-    #   1 = blend_fs   2 = ray_limit   3 = linear_interp   4 = blend_auto
-    _WM_CODE = {1: 'blend_fs', 2: 'ray_limit', 3: 'linear_interp', 4: 'blend_auto'}
+    #   1 = blend_fs   2 = ray_limit   3 = linear_interp   4 = Extend_2025
+    _WM_CODE = {1: 'blend_fs', 2: 'ray_limit', 3: 'linear_interp', 4: 'Extend_2025'}
     _wm_codes = _cfg.get('weight_methods', [1, 2, 3])
     RUN_METHODS = tuple(_WM_CODE[int(c)] for c in _wm_codes if int(c) in _WM_CODE)
     if not RUN_METHODS:
@@ -5023,23 +5489,14 @@ if __name__ == '__main__':
                   f"(τ_s = {mixing_timescale(_eps):.4g} s) =====")
         _eps_save = _eps_stem(_eps)
         _blend_subsets_cfg = _cfg.get('blend_subsets')
-        _blend_clamp = bool(_cfg.get('clamping', True))
-        if not _blend_clamp:
-            print("[blend_fs]   running UNCLAMPED (clamping=false in JSON)")
         _blend_fs_ok = ('blend_fs' not in RUN_METHODS) or _blend_fs_check_runnable(
             unique_sp_data, Stream_1_Feed, Stream_2_Feed, _blend_subsets_cfg)
-        _blend_auto_ok = ('blend_auto' not in RUN_METHODS) or _blend_fs_check_runnable(
-            unique_sp_data, Stream_1_Feed, Stream_2_Feed, None)
         if 'blend_fs' in RUN_METHODS and not _blend_fs_ok:
             print(f"[blend_fs]   not runnable (fewer than 2 products available "
                   f"for weighting); skipping.")
-        if 'blend_auto' in RUN_METHODS and not _blend_auto_ok:
-            print(f"[blend_auto]   not runnable (fewer than 2 one-short subsets); skipping.")
         ode_results = []
         for _wm in RUN_METHODS:
             if _wm == 'blend_fs' and not _blend_fs_ok:
-                continue
-            if _wm == 'blend_auto' and not _blend_auto_ok:
                 continue
             _res = integrate_species_odes(
                 unique_sp_data, Stream_1_Feed, Stream_2_Feed,
@@ -5050,8 +5507,7 @@ if __name__ == '__main__':
                 blend_subsets=_blend_subsets_cfg if _wm == 'blend_fs' else None,
                 ode_rtol=_cfg.get('rtol'),
                 ode_atol=_cfg.get('atol'),
-                reaction_orders=_cfg.get('orders'),
-                blend_clamp=_blend_clamp)
+                reaction_orders=_cfg.get('orders'))
             if _res.get('method_ran', True):
                 ode_results.append(_res)
             else:
@@ -5076,12 +5532,10 @@ if __name__ == '__main__':
         plot_ode_trajectories(ode_results, save_stem=_eps_save)
         plot_product_fractions_vs_time(ode_results, Stream_1_Feed,
                                        nu_reactants, nu_products, save_stem=_eps_save)
-        if abs(_eps - 100.0) < 1e-6 * 100.0 and ode_results:
+        if abs(_eps - 100.0) < 1e-6 * 100.0:
             _t_end_ref = float(ode_results[0]['t'][-1])
             save_ios_csv(BETA_MEAN_F, _eps, _t_end_ref, _eps_save)
         for _res in ode_results:
-            if abs(_eps - 1.0) < 1e-9:
-                save_ode_trajectories_csv(_res, _eps_save)
             plot_ode_limit_averages(_res, save_stem=_eps_save)
             plot_ode_beta_snapshots(unique_sp_data, _res, save_stem=_eps_save)
             plot_blendfs_diagnostics(_res, save_stem=_eps_save)
@@ -5090,6 +5544,8 @@ if __name__ == '__main__':
                                     blend_subsets=_bsubs_for_plot)
             plot_raylimit_diagnostics(_res, save_stem=_eps_save)
             plot_raylimit_limit_grid(_res, save_stem=_eps_save)
+            plot_extend2025_diagnostics(_res, save_stem=_eps_save)
+            plot_extend2025_limit_grid(_res, save_stem=_eps_save)
             plot_cprofile_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
         _all_base_results.extend(ode_results)
 
