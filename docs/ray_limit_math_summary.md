@@ -97,52 +97,57 @@ of each species consumed or produced per unit of accumulated reaction progress. 
 components $d_i$ are the net stoichiometric coefficients of a single effective lumped
 reaction encoding the current mixture of all five pathways:
 
-$$|d_A|\,A + |d_B|\,B + |d_C|\,C \;\longrightarrow\; d_R\,R + d_S\,S + d_Q\,Q$$
+$$|d_A|\,A + |d_B|\,B + |d_C|\,C \;\longrightarrow\; d_R\,R + d_T\,T + d_S\,S + d_Q\,Q$$
 
-(species with $d_i\approx 0$, here $T$, are in steady-state balance and do not appear
-explicitly). The coefficients rotate as the ODE state evolves. At the half-way output
-step ($\approx 50\%$ $A$ conversion):
+The coefficients rotate as the ODE state evolves. The table gives them at each
+trajectory's output-grid time-midpoint ($t=t_{\mathrm{end}}/2$) for three dissipation
+rates $\varepsilon$ — the actual $A$ conversion reached at that instant is $77\%$,
+$70\%$, and $92\%$ respectively, not a fixed $50\%$; the extent of reaction still
+differs substantially at the same *relative* point because the trajectories are far
+from self-similar across $\varepsilon$:
 
 | | $\varepsilon=10^{-6}$ | $\varepsilon=1$ | $\varepsilon=10^{6}$ |
 |---|---|---|---|
-| $(\alpha_t,\beta_t)$ | $(0.288,\,4.32)$ | $(0.379,\,5.68)$ | $(17.7,\,265)$ |
-| kink $f_s^{\star}$ | $0.193$ | $0.135$ | $0.078$ |
-| $\lambda$ (global) | $0.000^{\dagger}$ | $0.001$ | $0.054$ |
-| $d_A$ | $-0.706$ | $-0.655$ | $-0.868$ |
-| $d_B$ | $-0.237$ | $-0.337$ | $-0.819$ |
-| $d_C$ | $-0.237$ | $-0.291$ | $-0.048$ |
-| $d_R$ | $+0.004$ | $+0.309$ | $+0.818$ |
-| $d_S$ | $+0.233$ | $+0.027$ | $+0.001$ |
-| $d_Q$ | $+0.237$ | $+0.291$ | $+0.048$ |
+| $(\alpha_t,\beta_t)$ | $(0.311,\,4.66)$ | $(0.372,\,5.58)$ | $(14.5,\,218)$ |
+| kink $f_s^{\star}$ | $0.1927$ | $0.1366$ | $0.0781$ |
+| $\lambda$ (global) | $0.000^{\dagger}$ | $0.0008$ | $0.0541$ |
+| $d_A$ | $-0.7225$ | $-0.6556$ | $-0.8616$ |
+| $d_B$ | $-0.2422$ | $-0.3314$ | $-0.8135$ |
+| $d_C$ | $-0.2421$ | $-0.2868$ | $-0.0470$ |
+| $d_R$ | $+0.0040$ | $+0.2832$ | $+0.7560$ |
+| $d_T$ | $+0.0000$ | $+0.0108$ | $+0.0564$ |
+| $d_S$ | $+0.2382$ | $+0.0374$ | $+0.0011$ |
+| $d_Q$ | $+0.2421$ | $+0.2868$ | $+0.0470$ |
 
 $^{\dagger}$At $\varepsilon=10^{-6}$ the mean has reached the complete-reaction average, so $\lambda$ clamps to $0$ and $\langle C_i\rangle=\langle B_i\rangle$.
 
 **Building the limit at $\varepsilon=1$.** The effective reaction at this step is
 
-$$0.655\,A + 0.337\,B + 0.291\,C \;\longrightarrow\; 0.309\,R + 0.027\,S + 0.291\,Q.$$
+$$0.6556\,A + 0.3314\,B + 0.2868\,C \;\longrightarrow\; 0.2832\,R + 0.0108\,T + 0.0374\,S + 0.2868\,Q.$$
 
 The complete-reaction limit $B(f)$ is found by advancing $M(f)$ along this reaction as
 far as possible without a reactant going negative:
 
-$$c_{\max}(f) = \min\!\left(\frac{15f}{0.655},\;\frac{1.2(1-f)}{0.337},\;\frac{1.2(1-f)}{0.291}\right).$$
+$$c_{\max}(f) = \min\!\left(\frac{15f}{0.6556},\;\frac{1.2(1-f)}{0.3314},\;\frac{1.2(1-f)}{0.2868}\right).$$
 
 Since $B$ is tighter than $C$ (smaller denominator), the binding constraints are $A$ and
 $B$. With $p_i=M_i(0)/|d_i|$, $q_i=(M_i(1)-M_i(0))/|d_i|$:
 
-$$(p,q)_A=(0,\;22.89),\quad (p,q)_B=(3.565,\;{-3.565}),\quad (p,q)_C=(4.119,\;{-4.119}).$$
+$$(p,q)_A=(0,\;22.88),\quad (p,q)_B=(3.621,\;{-3.621}),\quad (p,q)_C=(4.183,\;{-4.183}).$$
 
-The $A$- and $B$-lines cross at the kink: $f_s^{\star}=3.565/26.46=0.135$,
-$c^{\star}=3.083$.  Peak values $v^{\mathrm{fs}}_i=M_i(f_s^{\star})+c^{\star}d_i$
-(e.g.\ $v^{\mathrm{fs}}_R = 3.083\times0.309=0.953$) and resulting averages and closure scalars:
+The $A$- and $B$-lines cross at the kink: $f_s^{\star}=3.621/26.50=0.1366$,
+$c^{\star}=3.127$.  Peak values $v^{\mathrm{fs}}_i=M_i(f_s^{\star})+c^{\star}d_i$
+(e.g.\ $v^{\mathrm{fs}}_R = 3.127\times0.2832=0.886$) and resulting averages and closure scalars:
 
 | $\varepsilon=1$ | $\langle M_i\rangle=y^0_i$ | $v^{\mathrm{fs}}_i$ (mol/m³) | $\langle B_i\rangle$ (mol/m³) | $y_i$ (mol/m³) | $\lambda_i$ | $\langle C_i\rangle$ |
 |---|---|---|---|---|---|---|
-| $A$ | 0.9375 | 0.000 | 0.282 | 0.282 | 0.001 | 0.282 |
-| $B$ | 1.1250 | 0.000 | 0.788 | 0.788 | 0.001 | 0.788 |
-| $C$ | 1.1250 | 0.140 | 0.833 | 0.834 | 0.001 | 0.834 |
-| $R$ | 0.0000 | 0.954 | 0.310 | 0.309 | 0.001 | 0.309 |
-| $S$ | 0.0000 | 0.084 | 0.027 | 0.027 | 0.001 | 0.027 |
-| $Q$ | 0.0000 | 0.899 | 0.292 | 0.291 | 0.001 | 0.291 |
+| $A$ | 0.9375 | 0.000 | 0.2814 | 0.2819 | 0.0008 | 0.2819 |
+| $B$ | 1.1250 | 0.000 | 0.7934 | 0.7936 | 0.0008 | 0.7936 |
+| $C$ | 1.1250 | 0.139 | 0.8379 | 0.8382 | 0.0008 | 0.8382 |
+| $R$ | 0.0000 | 0.886 | 0.2835 | 0.2832 | 0.0008 | 0.2832 |
+| $T$ | 0.0000 | 0.034 | 0.0108 | 0.0108 | 0.0008 | 0.0108 |
+| $S$ | 0.0000 | 0.117 | 0.0374 | 0.0374 | 0.0008 | 0.0374 |
+| $Q$ | 0.0000 | 0.897 | 0.2871 | 0.2868 | 0.0008 | 0.2868 |
 
 Every $\lambda_i$ equals the global scalar and $\langle C_i\rangle=y_i$ to the quoted digits.
 

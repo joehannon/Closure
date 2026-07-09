@@ -25,6 +25,5 @@
   "blend_subsets": [20,31],
   "weight_methods": [1,2,3,4],
   "mean_f": 0.0625,
-  "epsilon":[1e-6, 1e0, 1e6],
-  "clamping": true
+  "epsilon":[1e-6, 1e0, 1e6]
 }
