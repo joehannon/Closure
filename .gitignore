@@ -20,6 +20,9 @@ lines/
 species/
 *.csv
 
+# Working input configs (a curated examples/ folder will replace this)
+inputs/
+
 # Math summaries (regenerable via docs/*_math_summary.tex + tectonic)
 docs/blend_fs_summary.md
 docs/blend_fs_summary.pdf
