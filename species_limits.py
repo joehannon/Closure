@@ -143,8 +143,8 @@ def analyze_stream_limit_system(species_labels, reaction_labels, nu_reactants, n
             print("\nLP produced no valid fs; falling back to per-reaction limits.")
         else:
             print(f"\nDerived mixture fraction limit fs = {fs:.6f}")
-            # Recompute extents at fs using the sequential model so that catalyst
-            # depletion by non-catalytic reactions is properly accounted for.
+            # Recompute extents at fs using the phased model (single-stream reactions
+            # resolved first, then all cross-stream reactions jointly).
             all_active_at_fs = _cascade_active_reactions(
                 nu_r_reduced, nu_p_reduced, joint_candidates,
                 np.asarray(Y1, dtype=float), np.asarray(Y2, dtype=float))
@@ -672,21 +672,11 @@ def solve_max_extents_at_f(N, nu_reactants, nu_products, active_indices, f, Y1, 
         Y_avail = _apply_extents(Y_avail, xi_ss, N)
 
     if other:
-        # Within the cross-stream group, run non-catalytic reactions first so that
-        # any catalyst they consume is deducted from Y_avail before catalytic
-        # reactions check for catalyst presence.
-        cat_sizes = {r: catalyst_species(nu_reactants, nu_products, r).size for r in other}
-        non_cat = [r for r in other if cat_sizes[r] == 0]
-        cat_rxn = [r for r in other if cat_sizes[r] > 0]
-
-        if non_cat:
-            xi_nc = _solve_extent_lp(N, nu_reactants, nu_products, non_cat, Y_avail, fed_mask)
-            all_extents.update(xi_nc)
-            Y_avail = _apply_extents(Y_avail, xi_nc, N)
-
-        if cat_rxn:
-            xi_cat = _solve_extent_lp(N, nu_reactants, nu_products, cat_rxn, Y_avail, fed_mask)
-            all_extents.update(xi_cat)
+        # Catalytic and non-catalytic cross-stream reactions are solved jointly:
+        # neither gets priority claim on a shared reactant, and catalyst presence
+        # is checked against this same shared Y_avail (see _solve_extent_lp).
+        xi_other = _solve_extent_lp(N, nu_reactants, nu_products, other, Y_avail, fed_mask)
+        all_extents.update(xi_other)
 
     return all_extents
 
@@ -3147,6 +3137,18 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                 f"stream; {', '.join(_impure_feeds)} appear(s) in both streams "
                 f"(stream_1 and stream_2 both > 0). Reformulate the feeds so "
                 f"each reactant is pure, or use a different weight_method.")
+        for _cat_r in range(n_rxns):
+            if catalyst_species(nu_reactants, nu_products, _cat_r).size == 0:
+                continue
+            for _i in np.where(nu_net[:, _cat_r] > 0)[0]:
+                _downstream = [rxn_labels[_r2] for _r2 in range(n_rxns)
+                               if _r2 != _cat_r and nu_reactants[_i, _r2] > 0]
+                if _downstream:
+                    print(f"[ray_limit]   note: {species_list[_i]}, a product of catalytic "
+                          f"reaction {rxn_labels[_cat_r]}, is also a reactant in "
+                          f"{', '.join(_downstream)}; its C(f) shape near f=0/1 feeds into "
+                          f"that reaction's rate here, so compare the LP species-limit grid "
+                          f"against the ray_limit limit grid for {species_list[_i]}.")
     elif is_raylimit:
         print("[ray_limit]   [selectivity] no active reactions/species; "
               "falling back to linear_interp behaviour.")
