@@ -3,7 +3,7 @@
 
 Work in progress on research and development of closure models for fast reactions in turbulent liquids, especially expressions for C(f).
 
-Not ready to be used yet, unless you really know what you are doing:) I will make this pip installable when it's fully ready, probably Q4 2026.
+Not ready to be used widely yet. Only take a copy of you really know what you are doing :) I will make this pip installable when it's fully ready, probably Q4 2026.
 
 The key code is species_limits.py.  You feed that a JSON describing the chemical reaction system
 ```
