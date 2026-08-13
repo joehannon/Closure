@@ -12,7 +12,7 @@ python3 species_limits.py inputs/<filename>.JSON
 You can get the gist of what this does by reading my [blog](https://joehannon.github.io/blog/).  There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.26434/chemrxiv.15006522/v1) and a journal publication will be available soon.
 
 ## Videos ##
-The following videos illustrate the dynamic nature of the ray limit method for estimating the infinitely fast reaction limit.
+The following videos illustrate the dynamic nature of the ray limit method for estimating the infinitely fast reaction limit. Each one features a 5-reaction version of the second Bourne reaction, an azo-coupling that is mixing-sensitive.
 
 **Videos in format used in the latest code, "species view"**
 
