@@ -16,6 +16,8 @@ The following videos illustrate the dynamic nature of the ray limit method for e
 
 **Videos in format used in the latest code, "species view"**
 
+Species view shows the static limits that may be pre-calculated for each of the $2^N$ infinitely fast reaction subsets in an $N$-reaction system.  Ray limit's $B(f)$ is overlaid (black squares) on a subplot for each species.
+
 Limits $B(f)$ changing with time during a simulation, $\epsilon$=1 W/kg:
 
 https://github.com/user-attachments/assets/b56b4471-ff4a-4420-a6fe-34337f5ea9bd
@@ -29,6 +31,8 @@ Limits changing with mixing intensity when we sweep over a range of $\epsilon$ v
 https://github.com/user-attachments/assets/91dd986e-f1ff-404e-a259-d857f799b23d
 
 **Videos in format used in the ChemRxiv preprint, "subset view"**
+
+Subset view shows only ray limit's automatically calculated $B(f)$ on a single plot showing all species.
 
 Limits changing with time during a simulation:
 
