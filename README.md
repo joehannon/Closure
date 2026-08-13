@@ -1,6 +1,6 @@
 # Closure #
 
-Work in progress on research and development of closure models for fast reactions in turbulent liquids, especially expressions for C(f) via a new closure for the infinitely fast limit, B(f).
+Research and development of closure models for fast reactions in turbulent liquids, especially expressions for $B(f)$, the infinitely fast reaction limit that bounds $C(f)$.
 
 The code is not ready to be used widely yet. Only take a copy if you really know what you are doing :) I will make the code pip installable when it's fully ready for wider use, planned for Q4 2026.
 
