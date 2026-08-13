@@ -16,6 +16,8 @@ There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.
 
 The following videos show the ray limit method for estimating the infinitely fast reaction limit:
 
+##Videos in format used in the ChemRxiv preprint##
+
 Limits changing with time during a simulation:
 
 [Limits changing with time during a simulation](https://github.com/user-attachments/assets/fad753fd-be26-426c-bf49-5c9d27e62d63)
