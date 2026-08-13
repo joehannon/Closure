@@ -16,7 +16,9 @@ There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.
 
 The following videos show the ray limit method for estimating the infinitely fast reaction limit:
 
+Limits changing with time during a simulation:
 [Limits changing with time during a simulation](https://github.com/user-attachments/assets/fad753fd-be26-426c-bf49-5c9d27e62d63)
 
+Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) from low to high:
 [Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) from low to high](https://github.com/user-attachments/assets/df506b03-5ce7-4044-b82f-17da84cabd09)
 
