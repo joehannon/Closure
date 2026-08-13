@@ -14,7 +14,7 @@ You can get the gist of what this does by reading my [blog](https://joehannon.gi
 
 There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.26434/chemrxiv.15006522/v1).
 
-The following videos show the ray limit method for estimating the infinitely fast reaction limit.  The  in each simulation (top movie) and with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) (bottom movie).
+The following videos show the ray limit method for estimating the infinitely fast reaction limit:
 
 [Limits changing with time during a simulation](https://github.com/user-attachments/assets/fad753fd-be26-426c-bf49-5c9d27e62d63)
 
