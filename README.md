@@ -14,14 +14,20 @@ You can get the gist of what this does by reading my [blog](https://joehannon.gi
 ## Videos ##
 The following videos illustrate the dynamic nature of the ray limit method for estimating the infinitely fast reaction limit.
 
-**Videos in format used in the latest code**
+**Videos in format used in the latest code, "species view"**
+Limits changing with time during a simulation; also C(f) moving towards B(f):
 
+https://github.com/user-attachments/assets/b56b4471-ff4a-4420-a6fe-34337f5ea9bd
+
+C(f) moving towards B(f) at $\epsilon$=1E6 W/kg:
+
+https://github.com/user-attachments/assets/dcf397f9-4ed5-4f9b-9312-c2ba2f42d4bd
 
 Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) from low to high:
 
 https://github.com/user-attachments/assets/91dd986e-f1ff-404e-a259-d857f799b23d
 
-**Videos in format used in the ChemRxiv preprint**
+**Videos in format used in the ChemRxiv preprint, "subset view"**
 
 Limits changing with time during a simulation:
 
