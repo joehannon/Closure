@@ -15,6 +15,7 @@ You can get the gist of what this does by reading my [blog](https://joehannon.gi
 The following videos illustrate the dynamic nature of the ray limit method for estimating the infinitely fast reaction limit.
 
 **Videos in format used in the latest code, "species view"**
+
 Limits changing with time during a simulation; also C(f) moving towards B(f):
 
 https://github.com/user-attachments/assets/b56b4471-ff4a-4420-a6fe-34337f5ea9bd
