@@ -1,5 +1,5 @@
 
-**Closure**
+## Closure ##
 
 Work in progress on research and development of closure models for fast reactions in turbulent liquids, especially expressions for C(f).
 
@@ -16,7 +16,7 @@ There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.
 
 The following videos show the ray limit method for estimating the infinitely fast reaction limit:
 
-## Videos in format used in the ChemRxiv preprint ##
+** Videos in format used in the ChemRxiv preprint **
 
 Limits changing with time during a simulation:
 
