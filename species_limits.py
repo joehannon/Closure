@@ -3720,9 +3720,9 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         return M, B
 
     # ── blend_fs rate path: interpolate the product-weighted fs-rule blend of the
-    #    one-short limits against the no-reaction limit, by the mean ─────────────
+    #    blended subsets' limits against the no-reaction limit, by the mean ─────
     def _blendfs_weights(y_active):
-        """(w[k] over the one-short subsets, fs_blend) from each subset's
+        """(w[k] over the blended subsets, fs_blend) from each subset's
         distinguishing products' ODE amounts."""
         amts = np.array([
             sum(max(float(y_active[global_to_active[i]]), 0.0) for i in bf_distinguishing[k])
@@ -5197,7 +5197,7 @@ def _eval_cw_on_grid(profile_list, weights, f_grid):
 
 def plot_blendfs_diagnostics(ode_result, save_stem=None):
     """For a blend_fs ODE run, plot the time-varying per-subset blend weights and
-    the blended fs, with each one-short subset's fs as a reference line."""
+    the blended fs, with each blended subset's fs as a reference line."""
     import pathlib as _pathlib
 
     bf = ode_result.get('blendfs')
@@ -5236,7 +5236,7 @@ def plot_blendfs_diagnostics(ode_result, save_stem=None):
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
     _fit_legend_avoiding_curves(ax, h1 + h2, l1 + l2, _leg_fs, other_axes=(ax2,), loc='upper left')
-    ax.set_title(f'blend_fs: {n} one-short limits — weights & blended fs vs time  '
+    ax.set_title(f'blend_fs: {n} blended limits — weights & blended fs vs time  '
                  f'(ε={m_epsilon:.4g})', fontsize=10)
     fig.tight_layout()
 

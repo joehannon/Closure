@@ -1,6 +1,7 @@
 # OS / editor
 .DS_Store
 .vscode/
+.claude/
 
 # Python
 __pycache__/
@@ -28,7 +29,7 @@ docs/
 utils/
 
 # Misc
-untitled folder/
 CLAUDE.md
 pyrefly.toml
 side_projects/fs_sensitivity_test.py
+regenerate_all.sh
