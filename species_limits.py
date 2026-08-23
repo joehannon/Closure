@@ -22,16 +22,86 @@ DEFAULT_M_SC = 4000
 # position in a list), so a given method always looks the same across every
 # plot that overlays results from multiple methods.
 _WM_STYLE = {
-    'blend_fs':      dict(ls='-',  mk='o', mfc=None,   mew=0.5),  # filled circle,   solid
+    'blend_fs':      dict(ls='-',  mk='o', mfc='none', mew=1.4),  # hollow circle,   solid
     'ray_limit':     dict(ls='-',  mk='s', mfc='none', mew=1.4),  # hollow square,   solid
     'linear_interp': dict(ls='--', mk='^', mfc='none', mew=1.4),  # hollow triangle, dashed
 }
-_WM_STYLE_FALLBACK = dict(ls=(0, (3, 1, 1, 1)), mk='v', mfc=None, mew=0.5)
+_WM_STYLE_FALLBACK = dict(ls=(0, (3, 1, 1, 1)), mk='v', mfc='none', mew=1.4)
 
 
 def _wm_style(weight_method):
     """Fixed marker/linestyle for *weight_method*, same everywhere it's plotted."""
     return _WM_STYLE.get(weight_method, _WM_STYLE_FALLBACK)
+
+
+# Colour-blind-safe categorical palette: 8 hues, fixed order, chosen so that
+# adjacent series clear a colour-vision-deficiency separation check (not just
+# ordinary vision) -- species/products/subsets are assigned a slot by a fixed
+# index (never remapped by value), and CB_LINESTYLES cycles in once a series
+# count exceeds 8 so identity never relies on a repeated colour alone.
+CB_PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100',
+              '#e87ba4', '#008300', '#4a3aa7', '#e34948']
+CB_LINESTYLES = ['-', '--', '-.', ':']
+# Marker cycled in on every line series (not just past 8) so identity never
+# relies on colour/linestyle alone -- every chart of lines gets symbols too.
+_SP_MARKERS = ['o', '^', 's', 'D', 'v', '<', '>', 'p', 'h', '*']
+
+# Experiment: plot without colour at all.  When False, every series-identity
+# colour (_cb_style/_sp_color/_sp_linestyle, and the small non-species colour
+# cycles below) resolves to one of 8 fixed black/grey (colour, linestyle)
+# pairs instead of CB_PALETTE -- revert by flipping this back to True.
+_USE_COLOR = True
+_MONO_STYLES = [
+    ('black', '-'),
+    ('grey',  '-'),
+    ('black', '--'),
+    ('grey',  '--'),
+    ('black', ':'),
+    ('grey',  ':'),
+    ('black', (0, (6, 2, 2, 2))),
+    ('grey',  (0, (6, 2, 2, 2))),
+]
+
+
+def _active_palette():
+    """Flat colour cycle for non-species-indexed usages (e.g. one colour per
+    weight method or per reaction index) -- CB_PALETTE when coloured, the
+    black/grey cycle under the no-colour experiment."""
+    return CB_PALETTE if _USE_COLOR else [c for c, _ in _MONO_STYLES]
+
+
+def _cb_style(idx):
+    """(colour, linestyle, marker) for series *idx*, cycling linestyle once
+    colours repeat and marker on every index."""
+    if _USE_COLOR:
+        return (CB_PALETTE[idx % len(CB_PALETTE)],
+                CB_LINESTYLES[(idx // len(CB_PALETTE)) % len(CB_LINESTYLES)],
+                _SP_MARKERS[idx % len(_SP_MARKERS)])
+    color, ls = _MONO_STYLES[idx % len(_MONO_STYLES)]
+    return (color, ls, _SP_MARKERS[idx % len(_SP_MARKERS)])
+
+
+def _scaled_marker_lw(cell_w, cell_h):
+    """(marker size, line width, legend fontsize) scaled to one subplot's
+    physical size in inches (*cell_w* x *cell_h*, i.e. figsize / (ncols,
+    nrows)), so symbols, lines, and legend text look proportionate whether a
+    figure has one large panel or a dense grid of small ones -- rather than
+    a single fixed size everywhere."""
+    size = min(cell_w, cell_h)
+    ms = max(3.0, min(8.0, size * 1.15))
+    lw = max(0.8, min(2.0, size * 0.3))
+    fs = max(7.0, min(9.0, size * 1.8))
+    return ms, lw, fs
+
+
+_MARKER_FACE_ALPHA = 1.0
+
+
+def _face(color, alpha=_MARKER_FACE_ALPHA):
+    """RGBA for a semi-transparent marker face matching *color* -- the filled,
+    half-alpha marker experiment (in place of the previous hollow mfc='none')."""
+    import matplotlib.colors as mcolors
+    return mcolors.to_rgba(color, alpha)
 
 # CVODE (BDF) solve tolerances for the species ODEs.  Tighter than a casual
 # default because ray_limit's complete-reaction limit is rebuilt from the live
@@ -382,11 +452,25 @@ def derive_fs_from_cross_stream_reactions(N, nu_reactants, nu_products, candidat
     boundaries (f=1 for stream-1-only, f=0 for stream-2-only) to get effective
     feeds Y1_eff and Y2_eff for the cross-stream balance.
 
-    Step 2: LP over [f, xi_cs...] maximising total extent subject to species
-    non-negativity (as inequalities).  Using inequalities rather than equalities
-    means reactions with multiple co-reactants from the same stream are handled
-    correctly: only the most limiting co-reactant is binding at fs; the rest
-    remain as slack.  Returned extents include both phases scaled to fs.
+    Step 2: LP over [f, xi_coupling...] maximising total extent subject to
+    species non-negativity (as inequalities).  Using inequalities rather than
+    equalities means reactions with multiple co-reactants from the same
+    stream are handled correctly: only the most limiting co-reactant is
+    binding at fs; the rest remain as slack.
+
+    A candidate reaction is only a fs-DETERMINING "coupling" reaction if its
+    NET-consumed fed reactants span both streams (real stoichiometric
+    coupling).  A reaction that reaches stream-1 only through a catalyst
+    (net-zero, regenerated -- e.g. DMP + H2O + HCl -> Acetone + 2MeOH + HCl)
+    has no genuine mass-balance tie to the other stream and must not be
+    allowed to pull fs towards wherever ITS OWN (single-stream) reactants are
+    most abundant; it doesn't set fs, it just needs its catalyst present at
+    whatever fs the coupling reactions determine.  Such reactions are solved
+    afterwards, at the resulting mixed feed, via `_solve_extent_lp` -- which
+    already blocks a reaction outright if a catalyst is entirely absent, but
+    otherwise leaves its extent bounded only by its real (net-consumed)
+    reactants, not by catalyst quantity.  Returned extents include both
+    phases scaled to fs.
     """
     if not candidate_indices:
         return None, {}
@@ -409,7 +493,15 @@ def derive_fs_from_cross_stream_reactions(N, nu_reactants, nu_products, candidat
     if not active:
         return None, {}
 
-    n_rxn = len(active)
+    # Split into fs-determining "coupling" reactions vs. reactions only
+    # linked to the other stream via a catalyst -- see docstring.
+    coupling, catalyzed_only = _split_coupling_vs_catalyzed(N, stream_labels, active, fed_mask,
+                                                            nu_reactants, nu_products)
+
+    if not coupling:
+        return None, {}
+
+    n_rxn = len(coupling)
     n_var = 1 + n_rxn
 
     # Build inequality constraints: Y_mix(f)[s] + N[s,r]*xi >= 0 for each
@@ -421,23 +513,23 @@ def derive_fs_from_cross_stream_reactions(N, nu_reactants, nu_products, candidat
     # consumed by R2) need their own rows to enforce xi_R2 <= xi_R1 when R1+R2
     # are no longer pre-combined by eliminate_product_intermediates.
     consumed_any = sorted({
-        int(s) for r in active
+        int(s) for r in coupling
         for s in np.where(N[:, r] < 0)[0]
     })
     if consumed_any:
         ca = np.array(consumed_any)
         A_ub_lp = np.zeros((len(ca), n_var))
         A_ub_lp[:, 0] = -(Y1_eff[ca] - Y2_eff[ca])
-        A_ub_lp[:, 1:] = -N[np.ix_(ca, active)]
+        A_ub_lp[:, 1:] = -N[np.ix_(ca, coupling)]
         b_ub_lp = Y2_eff[ca]
     else:
         A_ub_lp = b_ub_lp = None
 
     # Equality constraints for competing primaries in the fs LP.
-    # Variables: [f, xi_active[0], xi_active[1], ...]; competing primaries forced equal.
-    idx_of_fs = {r: j for j, r in enumerate(active)}
+    # Variables: [f, xi_coupling[0], xi_coupling[1], ...]; competing primaries forced equal.
+    idx_of_fs = {r: j for j, r in enumerate(coupling)}
     A_eq_fs, b_eq_fs = [], []
-    for group in _competing_primary_groups(nu_reactants, active, fed_mask):
+    for group in _competing_primary_groups(nu_reactants, coupling, fed_mask):
         j0 = idx_of_fs[group[0]]
         for r in group[1:]:
             jk = idx_of_fs[r]
@@ -456,7 +548,7 @@ def derive_fs_from_cross_stream_reactions(N, nu_reactants, nu_products, candidat
     # which stream they come from.  With a flat -1 objective the LP is biased toward
     # reactions with low per-extent consumption of the shared stream-1 reactant.
     c = np.zeros(n_var)
-    for j, r in enumerate(active):
+    for j, r in enumerate(coupling):
         w = sum(float(nu_reactants[s, r]) for s in range(len(Y1f)) if fed_mask[s])
         c[1 + j] = -max(w, 1e-9)
     res = linprog(c,
@@ -471,12 +563,32 @@ def derive_fs_from_cross_stream_reactions(N, nu_reactants, nu_products, candidat
     if not (0.0 <= fs <= 1.0):
         return None, {}
 
-    extents = {int(active[j]): float(res.x[1 + j]) for j in range(n_rxn)}
+    extents = {int(coupling[j]): float(res.x[1 + j]) for j in range(n_rxn)}
     # Scale single-stream extents to fs
     for r, xi in xi1_max.items():
         extents[int(r)] = xi * fs
     for r, xi in xi2_max.items():
         extents[int(r)] = xi * (1.0 - fs)
+
+    # Reactions only linked to the other stream via a catalyst: their real
+    # (net-consumed) reactants are still bounded by the feed REMAINING after
+    # the coupling reaction(s) have taken their share (e.g. H2O, which R1
+    # produces and R2 consumes -- a genuine shared resource).  But the
+    # catalyst's mere PRESENCE is checked against the raw mixing line, not
+    # that post-coupling pool: a catalyst has net stoichiometry zero, so a
+    # coupling reaction's real consumption of it (e.g. R1 driving leftover
+    # HCl to zero for f<fs) doesn't mean it was ever truly unavailable --
+    # only that its FINAL net balance ends up spent.  Since it's regenerated,
+    # not consumed, by the catalyzed reaction, presence is a question of
+    # whether it exists in the feed at all.
+    if catalyzed_only:
+        Y_mix_fs = Y1_eff * fs + Y2_eff * (1.0 - fs)
+        Y_after_coupling = _apply_extents(Y_mix_fs, {r: extents[r] for r in coupling}, N)
+        Y_raw_fs = Y1f * fs + Y2f * (1.0 - fs)
+        xi_cat = _solve_extent_lp(N, nu_reactants, nu_products, catalyzed_only, Y_after_coupling, fed_mask,
+                                  Y_presence=Y_raw_fs)
+        extents.update(xi_cat)
+
     return fs, extents
 
 
@@ -512,6 +624,50 @@ def _split_by_stream(nu_reactants, stream_labels, candidate_indices):
         else:
             other.append(r)
     return ss1, ss2, other
+
+
+def _split_coupling_vs_catalyzed(N, stream_labels, candidate_indices, fed_mask,
+                                 nu_reactants=None, nu_products=None):
+    """Split cross-stream candidates into "coupling" (net-consumed fed
+    reactants span both streams -- genuine mass-balance coupling) vs.
+    "catalyzed" (net-consumed fed reactants confined to ONE stream, reached
+    from the other stream only via a regenerated catalyst -- net coefficient
+    zero, e.g. DMP + H2O + HCl -> Acetone + 2MeOH + HCl).
+
+    A catalyzed reaction has no real stoichiometric claim on the other
+    stream: it doesn't determine fs, and its catalyst can be fully consumed
+    by a coupling reaction that DOES really consume it (e.g. R1 uses up all
+    available HCl for every f up to fs, since HCl is the tighter constraint
+    there) -- so it must be solved AFTER the coupling reactions, against
+    whatever they leave behind, not against the raw mixing line.
+
+    Being confined to one FED stream is only "catalyzed" if the reaction
+    actually HAS a genuine (net-zero) catalyst species -- `nu_reactants`/
+    `nu_products`, if given, are used to check this via `catalyst_species`.
+    Without them, a reaction whose only OTHER net-consumed reactant is an
+    unfed intermediate (e.g. R2: A + R -> S, R produced by another reaction)
+    would be wrongly excluded from the fs-determining LP: R is a real,
+    irreversibly-consumed reactant, not a regenerated catalyst, so R2 still
+    has a genuine (indirect) claim on the other stream and must count as
+    "coupling", not "catalyzed"."""
+    coupling, catalyzed = [], []
+    for r in candidate_indices:
+        net_streams = set()
+        for s in np.where(N[:, r] < 0)[0]:
+            if not fed_mask[s]:
+                continue
+            sl = int(stream_labels[s])
+            if sl == 1:
+                net_streams.add(1)
+            elif sl == 2:
+                net_streams.add(2)
+            elif sl == 12:
+                net_streams.update((1, 2))
+        is_catalyzed = len(net_streams) < 2
+        if is_catalyzed and nu_reactants is not None and nu_products is not None:
+            is_catalyzed = catalyst_species(nu_reactants, nu_products, r).size > 0
+        (catalyzed if is_catalyzed else coupling).append(r)
+    return coupling, catalyzed
 
 
 def _presolve_single_stream(N, nu_r, nu_p, ss1, ss2, Y1f, Y2f, fed_mask=None):
@@ -559,12 +715,23 @@ def _cascade_active_reactions(nu_reactants, nu_products, candidates, Y1, Y2):
     return active
 
 
-def _solve_extent_lp(N, nu_reactants, nu_products, active_indices, Y_avail, fed_mask=None):
+def _solve_extent_lp(N, nu_reactants, nu_products, active_indices, Y_avail, fed_mask=None,
+                     Y_presence=None):
     """LP: maximise total reaction extent, subject to species non-negativity.
 
     Reflects the mixing-limited assumption: all kinetics are infinitely fast so
     reactions proceed as far as stoichiometry allows.  Uses HiGHS via linprog
     so constraint boundaries are hit exactly.
+
+    *Y_presence*, if given, is used instead of *Y_avail* for the catalyst
+    presence-only gate below.  A catalyst has net stoichiometry zero -- it is
+    regenerated, not consumed -- so its "availability" is a question of
+    whether it exists in the feed AT ALL, not how much of it some other
+    (real, net-consuming) reaction leaves behind.  A reaction's own real
+    extent is still correctly bounded by *Y_avail* (e.g. a shared reactant
+    genuinely produced/consumed by another reaction); only the binary
+    presence check for its catalyst(s) uses *Y_presence*.  Defaults to
+    *Y_avail* when not given (unchanged behaviour).
     """
     if not active_indices:
         return {}
@@ -589,11 +756,12 @@ def _solve_extent_lp(N, nu_reactants, nu_products, active_indices, Y_avail, fed_
     A_ub = (-N[:, active_indices]).astype(float)
     b_ub = np.asarray(Y_avail, dtype=float)
     # Catalyst presence-only: if absent the reaction is blocked outright.
+    Y_pres = np.asarray(Y_presence, dtype=float) if Y_presence is not None else Y
     bounds = [(0.0, None)] * n_rxn
     _PRESENCE_TOL = 1e-9
     for j, r in enumerate(active_indices):
         for k in catalyst_species(nu_reactants, nu_products, r):
-            if float(Y_avail[k]) < _PRESENCE_TOL:
+            if float(Y_pres[k]) < _PRESENCE_TOL:
                 # pyrefly: ignore [unsupported-operation]
                 bounds[j] = (0.0, 0.0)
                 break
@@ -648,11 +816,32 @@ def _apply_extents(Y, xi_map, N):
 
 
 def solve_max_extents_at_f(N, nu_reactants, nu_products, active_indices, f, Y1, Y2,
-                           stream_labels=None):
-    """Two-phase extent calculation at a given mixture fraction f.
+                           stream_labels=None, fs=None):
+    """Three-phase extent calculation at a given mixture fraction f.
 
     Phase 1: single-stream reactions consume their stream's feed to completion.
-    Phase 2: cross-stream (and other) reactions run on the remaining species.
+    Phase 2: cross-stream "coupling" reactions (genuine mass-balance ties to
+    both streams) run on the remaining species.
+    Phase 3: "catalyzed" cross-stream reactions (reach the other stream only
+    via a regenerated catalyst, not real net consumption) have their real
+    (net-consumed) reactants bounded by whatever phase 2 leaves behind (a
+    genuinely shared resource, e.g. H2O produced by phase 2 and consumed
+    here).
+
+    A catalyzed reaction's catalyst presence is handled in one of two ways,
+    depending on whether *fs* is given and a genuine coupling reaction (phase
+    2) is ALSO active and net-consumes that same catalyst species:
+      - No such competitor (or fs unknown): presence is checked against the
+        raw mixing line at this f -- a catalyst's net stoichiometry is zero,
+        so it's a question of whether it exists in the feed at all, not how
+        much some other reaction leaves behind.  Reacts fully for any f>0
+        (up to its own real reactants' limits).
+      - A genuine competitor IS active (e.g. R1 also consuming HCl): the
+        catalyst is merely LIMITED below fs, not absent -- present in the
+        raw feed, just scarcer than the coupling reaction's demand.  The
+        catalyzed reaction's extent then ramps linearly from 0 at f=0 to its
+        complete-reaction value at f=fs (where the competing demand is
+        exactly met), rather than being gated on/off.
     """
     if not active_indices:
         return {}
@@ -672,11 +861,42 @@ def solve_max_extents_at_f(N, nu_reactants, nu_products, active_indices, f, Y1, 
         Y_avail = _apply_extents(Y_avail, xi_ss, N)
 
     if other:
-        # Catalytic and non-catalytic cross-stream reactions are solved jointly:
-        # neither gets priority claim on a shared reactant, and catalyst presence
-        # is checked against this same shared Y_avail (see _solve_extent_lp).
-        xi_other = _solve_extent_lp(N, nu_reactants, nu_products, other, Y_avail, fed_mask)
-        all_extents.update(xi_other)
+        coupling, catalyzed = _split_coupling_vs_catalyzed(N, stream_labels, other, fed_mask,
+                                                           nu_reactants, nu_products)
+        if coupling:
+            xi_coupling = _solve_extent_lp(N, nu_reactants, nu_products, coupling, Y_avail, fed_mask)
+            all_extents.update(xi_coupling)
+            Y_avail = _apply_extents(Y_avail, xi_coupling, N)
+        if catalyzed:
+            contested, uncontested = [], []
+            for r in catalyzed:
+                cats = catalyst_species(nu_reactants, nu_products, r)
+                has_competitor = fs is not None and coupling and any(
+                    float(N[k, r2]) < -1e-9 for k in cats for r2 in coupling)
+                (contested if has_competitor else uncontested).append(r)
+
+            if uncontested:
+                Y_raw = Y1f * f + Y2f * (1.0 - f)
+                xi_cat = _solve_extent_lp(N, nu_reactants, nu_products, uncontested, Y_avail, fed_mask,
+                                          Y_presence=Y_raw)
+                all_extents.update(xi_cat)
+
+            if contested:
+                if f >= fs:
+                    Y_raw = Y1f * f + Y2f * (1.0 - f)
+                    xi_cat = _solve_extent_lp(N, nu_reactants, nu_products, contested, Y_avail, fed_mask,
+                                              Y_presence=Y_raw)
+                    all_extents.update(xi_cat)
+                else:
+                    # Catalyst is limited, not absent, below fs: ramp this
+                    # reaction's extent linearly from 0 at f=0 to its
+                    # complete-reaction value at f=fs (found by recursing to
+                    # f=fs, where the competing demand is exactly met and
+                    # the catalyst is no longer contested).
+                    xi_at_fs = solve_max_extents_at_f(N, nu_reactants, nu_products, active_indices,
+                                                      fs, Y1, Y2, stream_labels, fs=fs)
+                    for r in contested:
+                        all_extents[int(r)] = float(xi_at_fs.get(r, 0.0)) * (f / fs)
 
     return all_extents
 
@@ -759,7 +979,7 @@ def generate_line_segments(species_labels, Y1, Y2, results):
         Y_no_rxn[:, i] = y_mix
 
         xi_map = solve_max_extents_at_f(N_reduced, nu_r, nu_p, active_indices, f, Y1a, Y2a,
-                                        stream_labels)
+                                        stream_labels, fs=fs)
         xi_vec = np.zeros(n_rxn)
         for r, xi in xi_map.items():
             xi_vec[r] = xi
@@ -838,25 +1058,39 @@ def _parametric_breakpoints(N, nu_r, nu_p, all_active, Y1, Y2, fs=None):
             if 1e-9 < f_zero < 1.0 - 1e-9:
                 breakpoints.add(f_zero)
 
-    # For catalytic reactions with a stream-1-only catalyst (absent at f=0) or
-    # stream-2-only catalyst (absent at f=1), add a small interior breakpoint to
-    # capture the near-discontinuity where the catalyst first becomes present.
-    # If fs is known, also add fs+ε: catalytic reactions may become unblocked
-    # just above fs when a non-catalytic reaction stops consuming the catalyst.
+    # For a catalytic reaction with NO genuine coupling competitor for its
+    # catalyst active in this subset, the catalyst's raw feed is untouched by
+    # any other reaction, so it goes from truly absent (f=0, stream-1-only
+    # catalyst; or f=1, stream-2-only) to fully present at any f just past
+    # that boundary -- a real near-discontinuity, so add a small interior
+    # breakpoint to capture it (e.g. subset "R2 alone": DMP reacts for any
+    # f>0).  But when a genuine coupling reaction is ALSO active and net-
+    # consumes that same catalyst species (e.g. R1+R2 together, HCl shared),
+    # the catalyst is merely LIMITED (not absent) below fs -- present in the
+    # raw feed, just scarcer than the coupling reaction's demand -- and the
+    # catalyzed reaction's extent ramps linearly from the mixing line at f=0
+    # to fully reacted at fs (see `_solve_extent_lp`'s Y_presence handling).
+    # That's already exactly linear between the plain endpoints 0 and fs, so
+    # no extra interior breakpoint should be added for it.
     _EPS = 1e-3
     cat_map = {r: catalyst_species(nu_r, nu_p, r) for r in all_active}
-    has_catalytic = any(c.size > 0 for c in cat_map.values())
+    has_uncontested_catalytic = False
     for r in all_active:
         cats = cat_map[r]
         if cats.size == 0:
             continue
         _CAT_TOL = 1e-9
         for k in cats:
+            has_coupling_competitor = any(
+                float(N[k, r2]) < -_CAT_TOL for r2 in all_active if r2 != r)
+            if has_coupling_competitor:
+                continue
+            has_uncontested_catalytic = True
             if float(Y1_eff[k]) > _CAT_TOL and float(Y2_eff[k]) < _CAT_TOL:
                 breakpoints.add(_EPS)        # step at f=0 → f=ε
             elif float(Y2_eff[k]) > _CAT_TOL and float(Y1_eff[k]) < _CAT_TOL:
                 breakpoints.add(1.0 - _EPS)  # step at f=1 → f=1-ε
-    if fs is not None and has_catalytic:
+    if fs is not None and has_uncontested_catalytic:
         f_plus = float(fs) + _EPS
         if f_plus < 1.0 - _EPS:
             breakpoints.add(f_plus)
@@ -1251,51 +1485,75 @@ def plot_concentration_profiles(species_labels, results, segments, save_stem=Non
     stream_labels_arr = results['stream_labels']
     s1_active = [s for s in active if stream_labels_arr[s] in (1, 12)]
     s2_active = [s for s in active if stream_labels_arr[s] not in (1, 12)]
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_labels, prop_colors) for s in active}
+    color_map = {s: _sp_color(s, species_labels) for s in active}
+    ls_map = {s: _sp_linestyle(s, species_labels) for s in active}
+
+    # Detect any species whose global max dwarfs every other species sharing
+    # the same axis (left: stream-2 species, right: stream-1 species on the
+    # twin axis) -- e.g. a solvent fed in vast excess (water in the acetal
+    # case) would otherwise crush the others -- and scale it down to ~1000.
+    def _outlier_scale(group):
+        gmax = {s: max(np.max(np.abs(Y_no_rxn[s])), np.max(np.abs(Y_with_rxn[s]))) for s in group}
+        return _outlier_scale_divisors(gmax)
+
+    div_of = {**_outlier_scale(s1_active), **_outlier_scale(s2_active)}
+    _lbl = lambda s: f'{species_labels[s]}/{div_of[s]:g}' if s in div_of else species_labels[s]
+    _yv = lambda s, arr: arr / div_of[s] if s in div_of else arr
 
     fig, axes = plt.subplots(1, 3, figsize=(17, 5))
     axes[0].sharey(axes[1])
+    _ms, _lw, _leg_fs = _scaled_marker_lw(17.0 / 3.0, 5.0)
 
     n_s2 = len(s2_active)
     n_s1 = len(s1_active)
     fracs_s2 = np.linspace(0.15, 0.85, max(n_s2, 1))
     fracs_s1 = np.linspace(0.15, 0.85, max(n_s1, 1))
 
+    _mk_every = max(1, len(f_grid) // 15)
     twin0 = twin1 = None
     for ax_idx, Y_matrix in [(0, Y_no_rxn), (1, Y_with_rxn)]:
         ax = axes[ax_idx]
         for s in s2_active:
-            ax.plot(f_grid, Y_matrix[s], color=color_map[s])
-        _annotate_species_lines(ax, f_grid,
-            [(species_labels[s], color_map[s], Y_matrix[s]) for s in s2_active],
-            fracs_s2)
+            ax.plot(f_grid, _yv(s, Y_matrix[s]), color=color_map[s], linestyle=ls_map[s],
+                    marker=_sp_marker(s, species_labels), markevery=_mk_every,
+                    mfc=_face(color_map[s]), ms=_ms, lw=_lw, label=_lbl(s))
         if s1_active:
             ax_r = ax.twinx()
             for s in s1_active:
-                ax_r.plot(f_grid, Y_matrix[s], color=color_map[s])
-            _annotate_species_lines(ax_r, f_grid,
-                [(species_labels[s], color_map[s], Y_matrix[s]) for s in s1_active],
-                fracs_s1)
+                ax_r.plot(f_grid, _yv(s, Y_matrix[s]), color=color_map[s], linestyle=ls_map[s],
+                          marker=_sp_marker(s, species_labels), markevery=_mk_every,
+                          mfc=_face(color_map[s]), ms=_ms, lw=_lw, label=_lbl(s))
             if ax_idx == 0:
                 twin0 = ax_r
             else:
                 twin1 = ax_r
                 ax_r.set_ylabel('Stream 1 species (right axis)', fontsize=9)
+        _h, _l = ax.get_legend_handles_labels()
+        if ax_idx == 1 and twin1 is not None:
+            _h_r, _l_r = twin1.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        elif ax_idx == 0 and twin0 is not None:
+            _h_r, _l_r = twin0.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        if len(_l) > 1:
+            ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs)
     if twin0 is not None and twin1 is not None:
         twin1.sharey(twin0)
         twin0.tick_params(axis='y', labelright=False)
 
     # Third panel: reaction extents ξ(f) and total non-negativity violation.
     rxn_plotted = []
+    _rxn_i = 0
     for r, label in enumerate(reduced_labels):
         if np.max(np.abs(xi_at_bp[r])) > 1e-9:
-            line, = axes[2].plot(f_grid, xi_at_bp[r])
+            _rc, _rls, _rmk = _cb_style(_rxn_i)
+            _rxn_i += 1
+            line, = axes[2].plot(f_grid, xi_at_bp[r], color=_rc, linestyle=_rls,
+                                  marker=_rmk, markevery=max(1, len(f_grid) // 15),
+                                  mfc=_face(_rc), ms=_ms, lw=_lw, label=label)
             rxn_plotted.append((r, label, line.get_color()))
-    fracs_rxn = np.linspace(0.15, 0.85, max(len(rxn_plotted), 1))
-    _annotate_species_lines(axes[2], f_grid,
-        [(label, clr, xi_at_bp[r]) for r, label, clr in rxn_plotted],
-        fracs_rxn)
+    if len(rxn_plotted) > 1:
+        axes[2].legend(loc='best', frameon=False, fontsize=_leg_fs)
     ax2_right = axes[2].twinx()
     ax2_right.fill_between(f_grid, nonnegativity_violation, alpha=0.15, color='red')
     ax2_right.set_ylabel('Non-negativity violation (shaded)', color='red')
@@ -1306,7 +1564,6 @@ def plot_concentration_profiles(species_labels, results, segments, save_stem=Non
     axes[2].set_title('(iii) Reaction extents ξ(f)')
     for ax in axes:
         ax.set_xlabel('Mixture fraction f')
-        ax.grid(True, alpha=0.3)
         if fs is not None and 0.0 < fs < 1.0:
             ax.axvline(fs, color='k', linestyle=':', alpha=0.5)
     axes[0].set_ylabel('Species amount')
@@ -1320,19 +1577,20 @@ def plot_concentration_profiles(species_labels, results, segments, save_stem=Non
     fig2, axes2 = plt.subplots(nrows, ncols,
                                figsize=(4 * ncols, 3 * nrows),
                                squeeze=False)
+    _ms2, _lw2, _leg_fs2 = _scaled_marker_lw(4.0, 3.0)
+    _role0_color, _role1_color = _active_palette()[0], _active_palette()[1]
     for idx, s in enumerate(active):
         ax = axes2[idx // ncols][idx % ncols]
-        ax.plot(f_grid, Y_no_rxn[s], color='steelblue')
-        ax.plot(f_grid, Y_with_rxn[s], color='darkorange')
+        _mk2 = max(1, len(f_grid) // 15)
+        ax.plot(f_grid, Y_no_rxn[s], color=_role0_color, linestyle='-',
+                marker=_SP_MARKERS[0], markevery=_mk2, mfc=_face(_role0_color), ms=_ms2, lw=_lw2, label='no rxn')
+        ax.plot(f_grid, Y_with_rxn[s], color=_role1_color, linestyle='--',
+                marker=_SP_MARKERS[1], markevery=_mk2, mfc=_face(_role1_color), ms=_ms2, lw=_lw2, label='reacted')
         ax.set_title(species_labels[s], fontsize=10)
         ax.set_xlabel('f', fontsize=8)
-        ax.grid(True, alpha=0.3)
         if fs is not None and 0.0 < fs < 1.0:
             ax.axvline(fs, color='k', linestyle=':', alpha=0.5)
-        _annotate_species_lines(ax, f_grid,
-            [('no rxn', 'steelblue', Y_no_rxn[s]),
-             ('reacted', 'darkorange', Y_with_rxn[s])],
-            [0.25, 0.65])
+        ax.legend(loc='best', frameon=False, fontsize=_leg_fs2)
 
     # Hide unused subplot cells.
     for idx in range(n_active, nrows * ncols):
@@ -1350,70 +1608,15 @@ def plot_concentration_profiles(species_labels, results, segments, save_stem=Non
         plt.show()
 
 
-def _annotate_species_lines(ax, f_grid, species_data, fracs, fontsize=7):
-    """Place inline annotations for multiple lines, merging labels that would overlap.
-
-    species_data: list of (label, color, y_arr)
-    fracs:        list of x-fractions in [0,1] for annotation positions (one per entry)
-    fontsize:     text size for labels (default 7)
-    """
-    n = len(species_data)
-    if n == 0:
-        return
-    f0, f1 = float(f_grid[0]), float(f_grid[-1])
-    pts = []
-    for i, (label, color, y_arr) in enumerate(species_data):
-        x = f0 + fracs[i] * (f1 - f0)
-        y = float(np.interp(x, f_grid, y_arr))
-        pts.append((x, y, label, color))
-
-    ylo, yhi = ax.get_ylim()
-    y_thresh = max(abs(yhi - ylo), 1e-12) * 0.05
-    x_thresh = 0.15
-    pts = [p for p in pts if ylo <= p[1] <= yhi * 1.02]
-    n = len(pts)
-    if n == 0:
-        return
-
-    used = [False] * n
-    groups = []
-    for i in range(n):
-        if used[i]:
-            continue
-        group = [i]
-        used[i] = True
-        for j in range(i + 1, n):
-            if used[j]:
-                continue
-            if abs(pts[i][0] - pts[j][0]) < x_thresh and abs(pts[i][1] - pts[j][1]) < y_thresh:
-                group.append(j)
-                used[j] = True
-        groups.append(group)
-
-    for group in groups:
-        x = sum(pts[k][0] for k in group) / len(group)
-        y = sum(pts[k][1] for k in group) / len(group)
-        if len(group) == 1:
-            k = group[0]
-            ax.text(x, y, f' {pts[k][2]}', color=pts[k][3], fontsize=fontsize,
-                    ha='left', va='center',
-                    bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.75),
-                    zorder=5)
-        else:
-            from matplotlib.offsetbox import TextArea, HPacker, AnnotationBbox
-            boxes = [TextArea(' ' + pts[group[0]][2],
-                              textprops=dict(color=pts[group[0]][3], fontsize=fontsize))]
-            for k in group[1:]:
-                boxes.append(TextArea(', ' + pts[k][2],
-                                      textprops=dict(color=pts[k][3], fontsize=fontsize)))
-            # pyrefly: ignore [bad-argument-type]
-            pack = HPacker(children=boxes, pad=0, sep=0)
-            ab = AnnotationBbox(pack, (x, y), xycoords='data',
-                                box_alignment=(0, 0.5),
-                                bboxprops=dict(boxstyle='round,pad=0.1', fc='white',
-                                               ec='none', alpha=0.75),
-                                frameon=True, zorder=5)
-            ax.add_artist(ab)
+def _sp_index(sp, all_species):
+    """Global index of *sp* (name or int) within *all_species*, for consistent
+    colour/linestyle assignment regardless of which subset is being displayed."""
+    if isinstance(sp, (int, np.integer)):
+        return int(sp)
+    try:
+        return list(all_species).index(sp)
+    except ValueError:
+        return abs(hash(sp))
 
 
 def _sp_color(sp, all_species, palette=None):
@@ -1424,17 +1627,103 @@ def _sp_color(sp, all_species, palette=None):
     Using the global index ensures the same species always gets the same colour
     across every plot, regardless of which subset of species is being displayed.
     """
+    idx = _sp_index(sp, all_species)
+    if not _USE_COLOR:
+        return _MONO_STYLES[idx % len(_MONO_STYLES)][0]
     if palette is None:
-        import matplotlib.pyplot as plt
-        palette = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    if isinstance(sp, (int, np.integer)):
-        idx = int(sp)
-    else:
-        try:
-            idx = list(all_species).index(sp)
-        except ValueError:
-            idx = abs(hash(sp)) % len(palette)
+        palette = CB_PALETTE
     return palette[idx % len(palette)]
+
+
+def _sp_linestyle(sp, all_species):
+    """Linestyle to pair with _sp_color(sp, all_species): cycles in once the
+    colour palette wraps, so identity past 8 species never relies on colour alone."""
+    idx = _sp_index(sp, all_species)
+    if not _USE_COLOR:
+        return _MONO_STYLES[idx % len(_MONO_STYLES)][1]
+    return CB_LINESTYLES[(idx // len(CB_PALETTE)) % len(CB_LINESTYLES)]
+
+
+def _sp_marker(sp, all_species):
+    """Marker shape to pair with _sp_color(sp, all_species): the same species
+    gets the same marker in every plot, mirroring _sp_color's global index."""
+    idx = _sp_index(sp, all_species)
+    return _SP_MARKERS[idx % len(_SP_MARKERS)]
+
+
+def _outlier_scale_divisors(peak_of, target=1000.0, ratio=10.0):
+    """Species whose peak value dwarfs every other species sharing the same
+    plot axis (e.g. a solvent fed in vast excess, like water in the acetal
+    case) get a divisor that brings THEIR OWN peak down to about *target* --
+    so e.g. a peak of 55000 gets divided by round(55000/1000) = 55, landing
+    it near 1000 rather than always dividing by a flat, one-size-fits-all
+    factor.  *peak_of* maps species -> its peak value on the shared axis.
+    Only species whose peak exceeds *ratio* times every other species'
+    trigger scaling at all -- ordinary spread between species is left alone.
+    Returns {species: divisor} for the species that should be scaled."""
+    divisor_of = {}
+    for s, peak in peak_of.items():
+        others_max = max((v for o, v in peak_of.items() if o != s), default=0.0)
+        if others_max > 1e-12 and peak > ratio * others_max:
+            divisor_of[s] = max(1.0, round(peak / target))
+    return divisor_of
+
+
+def _outlier_scale_divisors_by_stream(peak_of, is_stream1, target=1000.0, ratio=10.0):
+    """Like _outlier_scale_divisors, but only compares a species against
+    OTHER species fed by the same stream -- a stream-1 concentrate (e.g. a
+    concentrated acid) is only an outlier relative to other stream-1 species,
+    never relative to a much larger stream-2 species (e.g. a solvent) that
+    may share a plot but not a comparable feed scale (and, on plots where the
+    two streams are drawn on separate/twin axes, don't even share a visual
+    scale at all).  *is_stream1* maps species -> True if fed by stream 1,
+    False otherwise (stream-2-fed or unfed, which conventionally shares
+    stream 2's scale)."""
+    s1 = {s: v for s, v in peak_of.items() if is_stream1[s]}
+    s2 = {s: v for s, v in peak_of.items() if not is_stream1[s]}
+    return {**_outlier_scale_divisors(s1, target, ratio), **_outlier_scale_divisors(s2, target, ratio)}
+
+
+def _heatmap_vmax_divisors(species_list, active, Y1, Y2):
+    """Per-species colour-scale vmax for the C(f)/B(f) heatmaps, plus a /N
+    divisor+label for whichever species' own feed concentration dwarfs its
+    stream co-feeds (e.g. water fed in vast excess).
+
+    Stream-1 and stream-2 species are treated as separate groups (each
+    stream can have its own natural scale) and outlier-detected within their
+    own group using each species' own feed concentration.  A group's
+    outlier(s) get scaled down to ~1000; every other stream-1 species shares
+    that stream's max feed concentration EXCLUDING any outlier, and every
+    other stream-2 species (plus unfed reaction products, which have no feed
+    of their own) shares stream 2's max feed concentration EXCLUDING any
+    outlier -- an outlier left in that max would otherwise still dominate it
+    and crush everything else back to near-floor colour."""
+    stream1 = [sp for sp in active if Y1[species_list.index(sp)] > 0]
+    own1 = {sp: float(Y1[species_list.index(sp)]) for sp in stream1}
+    div1 = _outlier_scale_divisors(own1)
+
+    stream2 = [sp for sp in active if sp not in stream1 and Y2[species_list.index(sp)] > 0]
+    own2 = {sp: float(Y2[species_list.index(sp)]) for sp in stream2}
+    div2 = _outlier_scale_divisors(own2)
+
+    div_of = {**div1, **div2}
+    outlier1_sgs = {species_list.index(sp) for sp in div1}
+    outlier2_sgs = {species_list.index(sp) for sp in div2}
+    non_outlier_Y1 = [float(Y1[sg]) for sg in range(len(Y1)) if Y1[sg] > 0 and sg not in outlier1_sgs]
+    non_outlier_Y2 = [float(Y2[sg]) for sg in range(len(Y2)) if Y2[sg] > 0 and sg not in outlier2_sgs]
+    max_Y1_excl = max(non_outlier_Y1) if non_outlier_Y1 else float(np.max(Y1))
+    max_Y2_excl = max(non_outlier_Y2) if non_outlier_Y2 else float(np.max(Y2))
+
+    vmax_of = {}
+    for sp in active:
+        if sp in div_of:
+            own = own1[sp] if sp in own1 else own2[sp]
+            vmax_of[sp] = own / div_of[sp]
+        elif sp in stream1:
+            vmax_of[sp] = max_Y1_excl
+        else:
+            vmax_of[sp] = max_Y2_excl
+    return vmax_of, div_of
 
 
 def _ray_equation_str(d, species_list, active_indices, tol=1e-9, rel_tol=0.0):
@@ -1457,15 +1746,80 @@ def _ray_equation_str(d, species_list, active_indices, tol=1e-9, rel_tol=0.0):
     return f'{lhs} → {rhs}'
 
 
+_SAVE_PDF = False  # --pdf CLI flag: also save each figure as a vector PDF alongside the PNG
+
+
 def _save_fig(fig, save_stem, filename):
-    """Save fig to <save_stem>.parent/plots/<filename>, close it, and print path."""
+    """Save fig to <save_stem>.parent/plots/<filename>, close it, and print path.
+
+    When _SAVE_PDF is set (the --pdf CLI flag), also saves a vector .pdf next
+    to the .png -- for figures submitted to journals, which typically require
+    vector graphics rather than a rasterized image.  The PDF is saved with a
+    blank figure title (journals normally caption figures in the manuscript
+    text, not on the figure itself), but keeps each subplot's own title; the
+    .png keeps its figure title too.
+    """
     import pathlib as _pathlib
     plots_dir = _pathlib.Path(save_stem).parent / 'plots'
     plots_dir.mkdir(exist_ok=True)
     path = plots_dir / filename
     fig.savefig(path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
     print(f"Saved to {path}")
+    if _SAVE_PDF:
+        pdf_path = path.with_suffix('.pdf')
+        fig.suptitle('')
+        fig.savefig(pdf_path, bbox_inches='tight')
+        print(f"Saved to {pdf_path}")
+    plt.close(fig)
+
+
+def _fit_legend_avoiding_curves(ax, handles, labels, fontsize, other_axes=(),
+                                loc='upper left', frameon=False):
+    """Place a legend inside *ax*, widening it from thin-and-tall (ncol=1) to
+    wide-and-short (more columns) if the default shape would otherwise cover
+    a plotted curve -- checked against *ax* and any twin axes in
+    *other_axes*, whose data can share the same physical box on a different
+    scale.  As a last resort (still overlapping at the widest layout), adds
+    headroom to each axis' y-limits so the legend has genuinely empty space
+    to sit in, per the fallback the plots should degrade to."""
+    fig = ax.figure
+    axes_to_check = (ax,) + tuple(other_axes)
+
+    def _overlaps(bbox):
+        for a in axes_to_check:
+            inv = a.transData.inverted()
+            x0, y0 = inv.transform((bbox.x0, bbox.y0))
+            x1, y1 = inv.transform((bbox.x1, bbox.y1))
+            lo_x, hi_x = sorted((x0, x1))
+            lo_y, hi_y = sorted((y0, y1))
+            for line in a.get_lines():
+                xd = np.asarray(line.get_xdata(), dtype=float)
+                yd = np.asarray(line.get_ydata(), dtype=float)
+                # Skip reference/marker artifacts (axhline's 2-point span,
+                # single-point endpoint dots) -- only real plotted curves count.
+                if xd.size <= 2:
+                    continue
+                mask = (xd >= lo_x) & (xd <= hi_x)
+                if mask.any() and np.any((yd[mask] >= lo_y) & (yd[mask] <= hi_y)):
+                    return True
+        return False
+
+    max_ncol = min(4, len(labels))
+    leg = None
+    for ncol in range(1, max_ncol + 1):
+        leg = ax.legend(handles, labels, fontsize=fontsize, loc=loc, frameon=frameon, ncol=ncol)
+        fig.canvas.draw()
+        if not _overlaps(leg.get_window_extent(fig.canvas.get_renderer())):
+            return leg
+    for _ in range(4):
+        for a in axes_to_check:
+            ylo, yhi = a.get_ylim()
+            a.set_ylim(ylo, yhi + 0.15 * (yhi - ylo))
+        leg = ax.legend(handles, labels, fontsize=fontsize, loc=loc, frameon=frameon, ncol=max_ncol)
+        fig.canvas.draw()
+        if not _overlaps(leg.get_window_extent(fig.canvas.get_renderer())):
+            return leg
+    return leg
 
 
 def plot_unique_species_profiles(unique_sp_data, save_stem=None):
@@ -1483,19 +1837,36 @@ def plot_unique_species_profiles(unique_sp_data, save_stem=None):
         return
 
     n_active = len(active)
-    ncols = min(4, n_active)
+    ncols = min(3, max(1, int(np.ceil(np.sqrt(n_active)))))
     nrows = (n_active + ncols - 1) // ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.5, 3.5)
 
     _tab_palette = _build_tab_palette()
+
+    # A label (e.g. '0_2_5') names the same subset/group of subsets in every
+    # species it appears in, so assign it one style globally -- giving that
+    # group the same colour and the same left-to-right legend position in
+    # every subplot it shows up in, instead of a per-subplot index.
+    _all_labels = []
+    _seen_labels = set()
+    for sp in active:
+        for label in species_data[sp]:
+            if label not in _seen_labels:
+                _seen_labels.add(label)
+                _all_labels.append(label)
+    _label_style = {label: _tab_palette[i % len(_tab_palette)] for i, label in enumerate(_all_labels)}
 
     for idx, sp in enumerate(active):
         ax = axes[idx // ncols][idx % ncols]
         profiles = species_data[sp]
-        colors = [_tab_palette[i % len(_tab_palette)] for i in range(len(profiles))]
 
+        _MAX_LABEL = 20
         curves = []
-        for i, (label, profile) in enumerate(profiles.items()):
+        for label in _all_labels:
+            if label not in profiles:
+                continue
+            profile = profiles[label]
             bps = profile['breakpoints']
             segs = profile['segments']
             if not bps or not segs:
@@ -1505,19 +1876,17 @@ def plot_unique_species_profiles(unique_sp_data, save_stem=None):
                 [segs[0][0] * bps[0] + segs[0][1]] +
                 [segs[j][0] * bps[j + 1] + segs[j][1] for j in range(len(segs))]
             )
-            color = colors[i]
-            ax.plot(f_grid, y_grid, color=color, lw=1.2)
+            color, ls, mk = _label_style[label]
+            display = label if len(label) <= _MAX_LABEL else label[:_MAX_LABEL - 3] + '...'
+            ax.plot(f_grid, y_grid, color=color, linestyle=ls, marker=mk,
+                    markevery=max(1, len(f_grid) // 15), mfc=_face(color), ms=_ms, lw=_lw, label=display)
             curves.append((f_grid, y_grid, label, color))
 
-        _MAX_LABEL = 20
-        fracs = np.linspace(0.1, 0.9, max(len(curves), 1))
-        for (f_grid, y_grid, label, color), frac in zip(curves, fracs):
-            display = label if len(label) <= _MAX_LABEL else label[:_MAX_LABEL - 3] + '...'
-            _annotate_species_lines(ax, f_grid, [(display, color, y_grid)], [frac])
+        if len(curves) > 1:
+            ax.legend(loc='best', frameon=False, fontsize=_leg_fs)
 
         ax.set_title(sp, fontsize=10)
         ax.set_xlabel('f', fontsize=8)
-        ax.grid(True, alpha=0.3)
 
     for idx in range(n_active, nrows * ncols):
         axes[idx // ncols][idx % ncols].set_visible(False)
@@ -1532,9 +1901,13 @@ def plot_unique_species_profiles(unique_sp_data, save_stem=None):
 
 
 def _build_tab_palette():
-    # pyrefly: ignore [missing-attribute]
-    return [c for cmap in (plt.cm.tab20, plt.cm.tab20b, plt.cm.tab20c)
-            for c in (cmap(i / 20) for i in range(20))]
+    """(colour, linestyle) pairs for higher-cardinality series (subsets, profiles).
+
+    Cycles the 8-colour CB_PALETTE against CB_LINESTYLES (32 combinations)
+    instead of a large bank of similar hues, so adjacent series stay
+    distinguishable by colour+linestyle rather than by hue alone once the
+    count exceeds 8."""
+    return [_cb_style(i) for i in range(len(CB_PALETTE) * len(CB_LINESTYLES))]
 
 
 def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_products,
@@ -1628,10 +2001,11 @@ def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_pro
     ncols = min(4, n_active)
     nrows = (n_active + ncols - 1) // ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.5, 3.5)
 
     n_profiles = len(profiles)
     _tab_palette = _build_tab_palette()
-    subset_colors = {p['subset_num']: _tab_palette[i % len(_tab_palette)]
+    subset_styles = {p['subset_num']: _tab_palette[i % len(_tab_palette)]
                      for i, p in enumerate(profiles)}
 
     # Baseline (no-reaction) and full-scheme profiles, located by size rather
@@ -1650,29 +2024,34 @@ def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_pro
                 continue
             # pyrefly: ignore [bad-index, unsupported-operation]
             y_arr = p['Y'][s]
-            color = subset_colors[p['subset_num']]
-            ax.plot(p['f_grid'], y_arr, color=color, lw=0.9, alpha=0.7, zorder=1)
+            color, ls, mk = subset_styles[p['subset_num']]
+            ax.plot(p['f_grid'], y_arr, color=color, linestyle=ls, marker=mk, mfc=_face(color),
+                    markevery=max(1, len(p['f_grid']) // 15), ms=_ms, lw=_lw * 0.6, alpha=0.7,
+                    zorder=1, label=str(p['subset_num']))
             curves.append((p['f_grid'], y_arr, p['subset_num'], color))
         # No-reaction baseline (dashed) — only when retained.
         if baseline is not None:
             # pyrefly: ignore [bad-index, unsupported-operation]
             y0 = baseline['Y'][s]
-            color0 = subset_colors[baseline['subset_num']]
-            ax.plot(baseline['f_grid'], y0, color=color0, lw=1.5, ls='--', zorder=4, alpha=0.9)
+            color0, _, mk0 = subset_styles[baseline['subset_num']]
+            ax.plot(baseline['f_grid'], y0, color=color0, lw=_lw, ls='--', zorder=4, alpha=0.9,
+                    marker=mk0, mfc=_face(color0), markevery=max(1, len(baseline['f_grid']) // 15), ms=_ms,
+                    label=str(baseline['subset_num']))
             curves.append((baseline['f_grid'], y0, baseline['subset_num'], color0))
         # Full scheme on top (bold) — only when retained.
         if full is not None and full is not baseline:
             # pyrefly: ignore [bad-index, unsupported-operation]
             yN = full['Y'][s]
-            colorN = subset_colors[full['subset_num']]
-            ax.plot(full['f_grid'], yN, color=colorN, lw=2.0, zorder=5)
+            colorN, _, mkN = subset_styles[full['subset_num']]
+            ax.plot(full['f_grid'], yN, color=colorN, lw=_lw * 1.33, zorder=5,
+                    marker=mkN, mfc=_face(colorN), markevery=max(1, len(full['f_grid']) // 15), ms=_ms + 1,
+                    label=str(full['subset_num']))
             curves.append((full['f_grid'], yN, full['subset_num'], colorN))
-        fracs = np.linspace(0.1, 0.9, max(len(curves), 1))
-        for (f_grid, y_arr, num, color), frac in zip(curves, fracs):
-            _annotate_species_lines(ax, f_grid, [(str(num), color, y_arr)], [frac])
+        if len(curves) > 1:
+            ax.legend(loc='best', frameon=False, fontsize=_leg_fs,
+                      ncol=max(1, (len(curves) + 5) // 6))
         ax.set_title(species_labels[s], fontsize=10)
         ax.set_xlabel('f', fontsize=8)
-        ax.grid(True, alpha=0.3)
 
     for idx in range(n_active, nrows * ncols):
         axes[idx // ncols][idx % ncols].set_visible(False)
@@ -1694,23 +2073,23 @@ def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_pro
     stream_labels_sub = identify_stream_feeds(Y1a, Y2a)
     s1_sub = [s for s in active if stream_labels_sub[s] in (1, 12)]
     s2_sub = [s for s in active if stream_labels_sub[s] not in (1, 12)]
-    prop_colors3 = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map3 = {s: _sp_color(s, species_labels, prop_colors3) for s in active}
+    color_map3 = {s: _sp_color(s, species_labels) for s in active}
+    ls_map3 = {s: _sp_linestyle(s, species_labels) for s in active}
+    mk_map3 = {s: _sp_marker(s, species_labels) for s in active}
 
-    # Detect any species whose global max exceeds 20× every other species; show it scaled /20.
+    # Detect any species whose global max dwarfs every OTHER SPECIES FED BY
+    # THE SAME STREAM and scale it down to ~1000, for a readable legend/axis
+    # -- stream-1 species (on the twin axis) are never compared against
+    # stream-2 species (on the main axis), since they don't share a scale.
     # pyrefly: ignore [bad-index, unsupported-operation]
     global_max3 = {s: max(np.max(np.abs(p['Y'][s])) for p in profiles) for s in active}
-    scale_div10 = set()
-    for s in active:
-        others_max = max((global_max3[o] for o in active if o != s), default=0.0)
-        if others_max > 1e-12 and global_max3[s] > 20.0 * others_max:
-            scale_div10.add(s)
+    div_of3 = _outlier_scale_divisors_by_stream(global_max3, {s: s in s1_sub for s in active})
 
     def _sub_label(s):
-        return species_labels[s] + '/20' if s in scale_div10 else species_labels[s]
+        return f'{species_labels[s]}/{div_of3[s]:g}' if s in div_of3 else species_labels[s]
 
     def _sub_y(s, y_arr):
-        return y_arr / 20.0 if s in scale_div10 else y_arr
+        return y_arr / div_of3[s] if s in div_of3 else y_arr
 
     n_subsets = len(profiles)
     ncols_sub = min(2 if n_subsets <= 8 else 3, n_subsets)
@@ -1718,32 +2097,29 @@ def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_pro
     fig3, axes3 = plt.subplots(nrows_sub, ncols_sub,
                                figsize=(4 * ncols_sub, 3.2 * nrows_sub),
                                squeeze=False)
-
-    n_s2_sub = len(s2_sub)
-    n_s1_sub = len(s1_sub)
-    fracs_s2_sub = np.linspace(0.15, 0.85, max(n_s2_sub, 1))
-    fracs_s1_sub = np.linspace(0.15, 0.85, max(n_s1_sub, 1))
+    _ms3, _lw3, _leg_fs3 = _scaled_marker_lw(4.0, 3.2)
 
     for idx, p in enumerate(profiles):
         ax = axes3[idx // ncols_sub][idx % ncols_sub]
+        _mk_every3 = max(1, len(p['f_grid']) // 15)
         for s in s2_sub:
             # pyrefly: ignore [bad-index, unsupported-operation]
-            ax.plot(p['f_grid'], _sub_y(s, p['Y'][s]), color=color_map3[s])
-        _annotate_species_lines(ax, p['f_grid'],
-            # pyrefly: ignore [bad-index, unsupported-operation]
-            [(_sub_label(s), color_map3[s], _sub_y(s, p['Y'][s])) for s in s2_sub],
-            fracs_s2_sub)
+            ax.plot(p['f_grid'], _sub_y(s, p['Y'][s]), color=color_map3[s], linestyle=ls_map3[s],
+                    marker=mk_map3[s], mfc=_face(color_map3[s]), markevery=_mk_every3, ms=_ms3, lw=_lw3, label=_sub_label(s))
         ax_r3 = None
         if s1_sub:
             ax_r3 = ax.twinx()
             for s in s1_sub:
                 # pyrefly: ignore [bad-index, unsupported-operation]
-                ax_r3.plot(p['f_grid'], _sub_y(s, p['Y'][s]), color=color_map3[s])
-            _annotate_species_lines(ax_r3, p['f_grid'],
-                # pyrefly: ignore [bad-index, unsupported-operation]
-                [(_sub_label(s), color_map3[s], _sub_y(s, p['Y'][s])) for s in s1_sub],
-                fracs_s1_sub)
+                ax_r3.plot(p['f_grid'], _sub_y(s, p['Y'][s]), color=color_map3[s], linestyle=ls_map3[s],
+                           marker=mk_map3[s], mfc=_face(color_map3[s]), markevery=_mk_every3, ms=_ms3, lw=_lw3, label=_sub_label(s))
             ax_r3.tick_params(axis='y', labelsize=6)
+        _h, _l = ax.get_legend_handles_labels()
+        if ax_r3 is not None:
+            _h_r, _l_r = ax_r3.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        if len(_l) > 1:
+            ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs3)
         rxn_list = p['reactions']
         # pyrefly: ignore [no-matching-overload]
         rxn_str = '∅ — no reaction' if not rxn_list else '\n'.join(rxn_list)
@@ -1754,7 +2130,6 @@ def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_pro
             title += f'\nfs = {fs_p:.4f}'
         ax.set_title(title, fontsize=7)
         ax.set_xlabel('f', fontsize=7)
-        ax.grid(True, alpha=0.3)
         # pyrefly: ignore [unsupported-operation]
         if fs_p is not None and 0.0 < fs_p < 1.0:
             ax.axvline(fs_p, color='k', linestyle=':', alpha=0.5)
@@ -1825,21 +2200,38 @@ def plot_ode_trajectories(ode_results, save_stem=None):
 
     n_rxns = len(rxn_labels) if has_rates else 0
 
+    def _lambda_source_of(res):
+        """blend_fs/ray_limit only: the 'blendfs'/'raylimit' sub-dict, whose
+        'prof' gives {species: array[:, 3]} -- that species' blend weight
+        λ(t) (0 = at the complete-reaction limit B(f), 1 = at the
+        no-reaction limit M(f)) -- and whose 'fsb' gives the run's fs(t)."""
+        bf = res.get('blendfs')
+        if bf is not None and bf.get('prof'):
+            return bf
+        rl = res.get('raylimit')
+        if rl is not None and rl.get('prof'):
+            return rl
+        return None
+
+    has_lambda = any(_lambda_source_of(r) is not None for r in ode_results)
+
     # ── Unified cell-based panel grid ─────────────────────────────────────────
     n_sp_panels    = (2 if has_minor else 1) if single_method else n_plot
     ios_panel      = n_sp_panels
-    n_total_panels = n_sp_panels + 1 + n_rxns
+    lambda_panel   = ios_panel + 1
+    rate_panel0    = lambda_panel + (1 if has_lambda else 0)
+    n_total_panels = n_sp_panels + 1 + (1 if has_lambda else 0) + n_rxns
     n_rows         = (n_total_panels + n_cols - 1) // n_cols
 
     fig = plt.figure(figsize=(4 * n_cols, 3 * n_rows))
     gs  = _gs.GridSpec(n_rows, n_cols, figure=fig)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4, 3)
 
     def _cell(panel_idx):
         r, c = divmod(panel_idx, n_cols)
         return fig.add_subplot(gs[r, c])
 
-    method_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    _sp_markers = ['o', '^', 's', 'D', 'v', '<', '>', 'p', 'h', '*']
+    method_colors = _active_palette()
 
     # ── Species panels ────────────────────────────────────────────────────────
     if single_method:
@@ -1850,38 +2242,34 @@ def plot_ode_trajectories(ode_results, save_stem=None):
         primary_curves = []
         for sp_idx, (i, sp) in enumerate(primary_sp):
             color = _sp_color(i, species_list, method_colors)
-            mkr = _sp_markers[sp_idx % len(_sp_markers)]
+            mkr = _sp_marker(i, species_list)
             y_arr = res0['y'][:, i]
-            ax_maj.plot(t_arr, y_arr, lw=1.5, color=color,
-                        marker=mkr, ms=3, markevery=every, mfc='none', mew=0.8)
+            ax_maj.plot(t_arr, y_arr, lw=_lw, color=color, label=sp,
+                        marker=mkr, ms=_ms, markevery=every, mfc=_face(color), mew=1.2)
             primary_curves.append((sp, color, y_arr))
         ax_maj.set_xlabel('t (s)', fontsize=8)
         ax_maj.set_ylabel('concentration (mol/m³)', fontsize=8)
         ax_maj.tick_params(labelsize=7)
         ax_maj.set_title('Major species', fontsize=10)
         if primary_curves:
-            _annotate_species_lines(ax_maj, t_arr, primary_curves,
-                                    list(np.linspace(0.05, 0.85, len(primary_curves))),
-                                    fontsize=9)
+            ax_maj.legend(loc='best', frameon=False, fontsize=_leg_fs)
 
         if has_minor:
             ax_min = _cell(1)
             secondary_curves = []
             for sp_idx, (i, sp) in enumerate(secondary_sp):
                 color = _sp_color(i, species_list, method_colors)
-                mkr = _sp_markers[sp_idx % len(_sp_markers)]
+                mkr = _sp_marker(i, species_list)
                 y_arr = res0['y'][:, i]
-                ax_min.plot(t_arr, y_arr, lw=1.5, color=color,
-                            marker=mkr, ms=3, markevery=every, mfc='none', mew=0.8)
+                ax_min.plot(t_arr, y_arr, lw=_lw, color=color, label=sp,
+                            marker=mkr, ms=_ms, markevery=every, mfc=_face(color), mew=1.2)
                 secondary_curves.append((sp, color, y_arr))
             ax_min.set_xlabel('t (s)', fontsize=8)
             ax_min.set_ylabel('concentration (mol/m³)', fontsize=8)
             ax_min.tick_params(labelsize=7)
             ax_min.set_title('Minor species', fontsize=10)
             if secondary_curves:
-                _annotate_species_lines(ax_min, t_arr, secondary_curves,
-                                        list(np.linspace(0.05, 0.85, len(secondary_curves))),
-                                        fontsize=9)
+                ax_min.legend(loc='best', frameon=False, fontsize=_leg_fs)
     else:
         for plot_idx, (i, sp) in enumerate(zip(active_indices, active_species)):
             ax = _cell(plot_idx)
@@ -1890,38 +2278,90 @@ def plot_ode_trajectories(ode_results, save_stem=None):
                 color = method_colors[res_idx % len(method_colors)]
                 st = _wm_style(method)
                 every = max(1, len(res['t']) // 15)
-                mfc = color if st['mfc'] is None else 'none'
-                ax.plot(res['t'], res['y'][:, i], lw=1.5, color=color, ls=st['ls'],
-                        marker=st['mk'], ms=4, markevery=every, mfc=mfc, mew=st['mew'],
+                mfc = color if st['mfc'] is None else _face(color)
+                ax.plot(res['t'], res['y'][:, i], lw=_lw, color=color, ls=st['ls'],
+                        marker=st['mk'], ms=_ms, markevery=every, mfc=mfc, mew=st['mew'],
                         label=method)
             ax.axhline(ref['y'][0, i], color='gray', lw=0.7, ls='--', alpha=0.5)
             ax.set_title(sp, fontsize=10)
             ax.set_xlabel('t (s)', fontsize=8)
             ax.set_ylabel('C', fontsize=8)
             ax.tick_params(labelsize=7)
-            ax.legend(fontsize=6, loc='best')
+            ax.legend(fontsize=_leg_fs, loc='best', frameon=False)
 
     # ── Intensity of segregation ──────────────────────────────────────────────
     ax_var = _cell(ios_panel)
     t_dense = np.linspace(0.0, float(ref['t'][-1]), 500)
     max_var = mean_f * (1.0 - mean_f)
     ios_curve = np.array([mixing_variance(t, mean_f, m_epsilon, m_lambda, m_nu, m_Sc) / max_var for t in t_dense])
-    ax_var.plot(t_dense, ios_curve, color='steelblue', lw=1.5)
+    ax_var.plot(t_dense, ios_curve, color='steelblue', lw=_lw)
     ax_var.set_xlabel('t (s)', fontsize=8)
     ax_var.set_ylabel('$I_s$', fontsize=8)
     ax_var.set_title(f'Intensity of segregation  (ε={m_epsilon:.4g})', fontsize=10)
     ax_var.tick_params(labelsize=7)
-    ax_var.grid(True, alpha=0.3)
+
+    # ── Blend weight λ(t) (blend_fs / ray_limit only), with fs(t) on a
+    # ── linear right axis (minimum span 0.2, so a near-constant fs doesn't
+    # ── get exaggerated by autoscaling to a razor-thin range) ────────────────
+    if has_lambda:
+        _lam_floor = 1e-8   # log-scale display floor; λ is often clamped to exactly 0
+        ax_lam = _cell(lambda_panel)
+        ax_fs = ax_lam.twinx()
+        fs_vals = []
+        for res_idx, res in enumerate(ode_results):
+            src = _lambda_source_of(res)
+            if src is None:
+                continue
+            method = res.get('weight_method', f'run{res_idx}')
+            st = _wm_style(method)
+            every = max(1, len(res['t']) // 15)
+            # All species share the same λ almost always -- draw one
+            # representative curve per method (not one per species) so the
+            # single 'λ' legend entry's colour actually matches what's drawn,
+            # rather than labelling just the first of several overlapping,
+            # differently-coloured per-species lines.
+            _, arr0 = next(iter(src['prof'].items()))
+            lam = np.maximum(arr0[:, 3], _lam_floor)
+            color = CB_PALETTE[0]
+            mfc = color if st['mfc'] is None else _face(color)
+            ax_lam.plot(res['t'], lam, color=color, ls=st['ls'], lw=_lw,
+                       marker=st['mk'], ms=_ms, markevery=every, mfc=mfc, mew=st['mew'],
+                       label=f'λ ({method})' if len(ode_results) > 1 else 'λ')
+            fsb = np.asarray(src.get('fsb'), dtype=float)
+            fs_mask = np.isfinite(fsb) & (fsb > 0.0) & (fsb < 1.0)
+            if fs_mask.any():
+                ax_fs.plot(res['t'][fs_mask], fsb[fs_mask], color='black', ls=st['ls'], lw=1.5,
+                          marker='o', ms=_ms, markevery=every, mfc=_face('black'), mew=st['mew'],
+                          label=f'fs ({method})' if len(ode_results) > 1 else 'fs')
+                fs_vals.append(fsb[fs_mask])
+        ax_lam.set_xlabel('t (s)', fontsize=8)
+        ax_lam.set_ylabel('λ', fontsize=8)
+        ax_lam.set_yscale('log')
+        ax_lam.set_ylim(_lam_floor, 1.5)
+        ax_lam.set_title('Blend weight λ  (0 = B(f), 1 = M(f))', fontsize=10)
+        ax_lam.tick_params(labelsize=7)
+        if fs_vals:
+            fs_lo, fs_hi = float(np.min(np.concatenate(fs_vals))), float(np.max(np.concatenate(fs_vals)))
+            if fs_hi - fs_lo < 0.2:
+                mid = 0.5 * (fs_lo + fs_hi)
+                fs_lo, fs_hi = mid - 0.1, mid + 0.1
+            ax_fs.set_ylim(fs_lo, fs_hi)
+        ax_fs.set_ylabel('fs', fontsize=8)
+        ax_fs.tick_params(labelsize=7)
+        _h, _l = ax_lam.get_legend_handles_labels()
+        _h2, _l2 = ax_fs.get_legend_handles_labels()
+        if len(_h) + len(_h2) > 1:
+            ax_lam.legend(_h + _h2, _l + _l2, fontsize=_leg_fs, loc='best', frameon=False)
 
     # ── One subplot per reaction (colour = reaction; linestyle+marker = method) ──
     if has_rates:
-        rxn_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        rxn_colors = _active_palette()
         cont_times = sorted({t for r in ode_results
                              for t, _ in r.get('continuous_events', [])})
         jump_times = sorted({t for r in ode_results
                              for t, _ in r.get('jump_events', [])})
         for j, lbl in enumerate(rxn_labels):
-            ax_r = _cell(ios_panel + 1 + j)
+            ax_r = _cell(rate_panel0 + j)
             color = rxn_colors[j % len(rxn_colors)]
             for res_idx, res in enumerate(ode_results):
                 rates = res.get('rates')
@@ -1930,21 +2370,20 @@ def plot_ode_trajectories(ode_results, save_stem=None):
                 method = res.get('weight_method', f'run{res_idx}')
                 st = _wm_style(method)
                 every = max(1, len(res['t']) // 15)
-                mfc = color if st['mfc'] is None else 'none'
-                ax_r.plot(res['t'], rates[:, j], color=color, ls=st['ls'], lw=1.5,
-                          marker=st['mk'], ms=4, markevery=every, mfc=mfc, mew=st['mew'],
+                mfc = color if st['mfc'] is None else _face(color)
+                ax_r.plot(res['t'], rates[:, j], color=color, ls=st['ls'], lw=_lw,
+                          marker=st['mk'], ms=_ms, markevery=every, mfc=mfc, mew=st['mew'],
                           label=method if len(ode_results) > 1 else None)
             for t_c in cont_times:
                 ax_r.axvline(t_c, color='green', lw=0.8, ls='--', alpha=0.4)
             for t_j in jump_times:
                 ax_r.axvline(t_j, color='purple', lw=0.8, ls='--', alpha=0.4)
             ax_r.set_xlabel('t (s)', fontsize=8)
-            ax_r.set_ylabel('rate', fontsize=8)
+            ax_r.set_ylabel('rate  (mol/(m³·s))', fontsize=8)
             ax_r.set_title(lbl, fontsize=10)
             ax_r.tick_params(labelsize=7)
-            ax_r.grid(True, alpha=0.3)
             if len(ode_results) > 1:
-                ax_r.legend(fontsize=6, loc='best')
+                ax_r.legend(fontsize=_leg_fs, loc='best', frameon=False)
 
     # hide unused cells in last row
     for p in range(n_total_panels, n_rows * n_cols):
@@ -2032,12 +2471,14 @@ def plot_product_fractions_vs_time(ode_results, Y1, nu_reactants, nu_products,
     if not all_products:
         print("[plot] no products to plot product fractions for; skipping.")
         return
-    prod_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     _sp_list_ref = ode_results[0]['species']
-    color_of = {p: _sp_color(p, _sp_list_ref, prod_colors) for p in all_products}
+    color_of = {p: _sp_color(p, _sp_list_ref) for p in all_products}
+    ls_of = {p: _sp_linestyle(p, _sp_list_ref) for p in all_products}
+    mk_of = {p: _sp_marker(p, _sp_list_ref) for p in all_products}
 
     n = len(ode_results)
     fig, axes = plt.subplots(1, n, figsize=(5 * n, 4.0), squeeze=False, sharey=True)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(5.0, 4.0)
 
     for res_idx, res in enumerate(ode_results):
         ax = axes[0][res_idx]
@@ -2069,18 +2510,20 @@ def plot_product_fractions_vs_time(ode_results, Y1, nu_reactants, nu_products,
             total[k] = c['fraction']
 
         for p in products:
-            ax.plot(t, fracs[p], lw=1.8, color=color_of[p], label=f'$X_{{{p}}}$')
+            ax.plot(t, fracs[p], lw=_lw, color=color_of[p], linestyle=ls_of[p],
+                    marker=mk_of[p], mfc=_face(color_of[p]), markevery=max(1, len(t) // 15), ms=_ms,
+                    label=f'$X_{{{p}}}$')
         ax.plot(t, total, lw=1.0, color='grey', ls='--', label='total')
         ax.axhline(1.0, color='grey', lw=0.6, ls=':', alpha=0.6)
         ax.set_title(f'{method}  ({L_name} → products)', fontsize=10)
         ax.set_xlabel('t (s)', fontsize=8)
         ax.tick_params(labelsize=7)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=7, loc='best', ncol=max(1, (len(products) + 1) // 4))
+        _h, _l = ax.get_legend_handles_labels()
+        _fit_legend_avoiding_curves(ax, _h, _l, _leg_fs, loc='upper right')
 
-    axes[0][0].set_ylabel('fraction of consumed limiting reactant', fontsize=8)
-    fig.suptitle('Product fractions $X_p$ vs time (by weighting method)', fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    axes[0][0].set_ylabel('$X_{\\mathrm{species}}$', fontsize=8)
+    fig.tight_layout()
+    fig.suptitle('Product fractions $X_p$ vs time (by weighting method)', fontsize=11, y=1.0)
 
     if save_stem is not None:
         _save_fig(fig, save_stem,
@@ -2585,12 +3028,13 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     _present_wms_early = [wm for wm in weight_methods if wm in sweep]
     _has_fsb = any('fsb_finals' in sweep.get(wm, {}) for wm in _present_wms_early)
     if _has_fsb:
-        fig, (ax, ax_fs) = plt.subplots(2, 1, figsize=(8, 11),
-                                        gridspec_kw={'height_ratios': [2, 1]})
+        fig, (ax, ax_chk, ax_fs) = plt.subplots(3, 1, figsize=(8, 12),
+                                                gridspec_kw={'height_ratios': [1.5, 1, 1]})
     else:
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, (ax, ax_chk) = plt.subplots(2, 1, figsize=(8, 9),
+                                         gridspec_kw={'height_ratios': [1.5, 1]})
         ax_fs = None
-    _sweep_palette = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
+    _sweep_palette = _active_palette()
     color = {p: _sp_color(p, _all_species or [], _sweep_palette) for p in all_products}
     # Per-method visual encoding: linestyle, marker shape, fill (None=filled / 'none'=hollow),
     # and marker edge width, from the shared _WM_STYLE mapping (same symbol for
@@ -2598,8 +3042,7 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     # heavier/lighter line weight so methods stay distinguishable even when two
     # curves share the same product colour.
     _ms = 6   # marker size (uniform)
-    # Conversion and TOTAL (closure checks) live on a right-hand y-axis.
-    ax_chk = ax.twinx()
+    # Conversion and TOTAL (closure checks) live on their own subplot below.
     _present_wms = _present_wms_early
     eps_x = sweep[_present_wms[0]]['epsilons']
     for m_idx, wm in enumerate(weight_methods):
@@ -2612,59 +3055,61 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
         for p in all_products:
             if p not in s['fractions']:
                 continue
-            _mfc = color[p] if st['mfc'] is None else 'none'
+            _mfc = color[p] if st['mfc'] is None else _face(color[p])
             ax.plot(s['epsilons'], s['fractions'][p], ls,
                     marker=mk, color=color[p], mfc=_mfc, mew=mew, ms=_ms, lw=lw)
         # Fractional conversion of the limiting reactant (close to 1 in many cases).
-        _mfc_gray = 'tab:gray' if st['mfc'] is None else 'none'
+        _mfc_gray = 'tab:gray' if st['mfc'] is None else _face('tab:gray')
         ax_chk.plot(s['epsilons'], s['conversion'], ls,
                     marker=mk, color='tab:gray', mfc=_mfc_gray, mew=mew, ms=_ms, lw=1.5)
-        _mfc_blk = 'black' if st['mfc'] is None else 'none'
+        _mfc_blk = 'black' if st['mfc'] is None else _face('black')
         ax_chk.plot(s['epsilons'], s['total'], ls,
                     marker=mk, color='black', mfc=_mfc_blk, mew=mew, ms=_ms, lw=2.0)
 
     lim_names = ', '.join(sorted({str(s['limiting_reactant']) for s in sweep.values()}))
-    ax.set_xscale('log')
     # Label every decade across the swept range.
     import matplotlib.ticker as _mticker
     _lo = int(np.floor(np.log10(epsilons.min())))
     _hi = int(np.ceil(np.log10(epsilons.max())))
     _decades = np.arange(_lo, _hi + 1)
-    ax.set_xticks(10.0 ** _decades.astype(float))
-    ax.set_xticklabels([f'$10^{{{d}}}$' for d in _decades])
-    ax.xaxis.set_minor_locator(_mticker.NullLocator())
+    for _a in (ax, ax_chk):
+        _a.set_xscale('log')
+        _a.set_xticks(10.0 ** _decades.astype(float))
+        _a.set_xticklabels([f'$10^{{{d}}}$' for d in _decades])
+        _a.xaxis.set_minor_locator(_mticker.NullLocator())
+        _a.set_xlabel('turbulent dissipation rate  ε  (W/kg)')
     # Tick marks every 0.1 on both y-axes.
     ax.yaxis.set_major_locator(_mticker.MultipleLocator(0.1))
     ax_chk.yaxis.set_major_locator(_mticker.MultipleLocator(0.1))
     ax_chk.set_ylim(0.0, 1.1)
-    ax.set_ylabel(f'fraction of consumed {lim_names} ending up as product  (X_species)')
+    ax.set_ylabel('$X_{\\mathrm{species}}$')
     ax_chk.set_ylabel('conversion / closure total  (X_conv, TOTAL)')
     ax.set_title(f'Product fractions vs dissipation rate ε  '
                  f'(mean_f={mean_f:.4f},  limiting reactant {lim_names},  '
                  f'integration to {conversion_target:g} conversion)')
-    ax.grid(True, alpha=0.3)
-    # Legend: colours → products/checks, markers/linestyles → methods.
+    # Legend: colours → products, markers/linestyles → methods.
     from matplotlib.lines import Line2D
     leg_h, leg_l = [], []
     for p in all_products:
         leg_h.append(Line2D([0], [0], color=color[p], lw=2.0))
-        leg_l.append(f'X_{p}')
-    leg_h.append(Line2D([0], [0], color='black', lw=2.0))
-    leg_l.append('TOTAL (right axis)')
-    leg_h.append(Line2D([0], [0], color='tab:gray', lw=1.5))
-    leg_l.append('X_conv (right axis)')
-    for m_idx, wm in enumerate(weight_methods):
-        if wm not in sweep:
-            continue
-        st = _wm_style(wm)
-        _mfc_leg = 'k' if st['mfc'] is None else 'none'
-        leg_h.append(Line2D([0], [0], color='k', lw=2.0 if st['mfc'] is None else 1.8,
-                             ls=st['ls'], marker=st['mk'],
-                             ms=_ms, mfc=_mfc_leg, mew=st['mew']))
-        leg_l.append(wm)
-    _leg_anchor = (0.5, -0.14) if ax_fs is None else (0.5, -0.08)
-    ax.legend(leg_h, leg_l, loc='upper center', bbox_to_anchor=_leg_anchor,
-              ncol=3, fontsize=8, framealpha=0.85, handlelength=2.5)
+        leg_l.append(f'$X_{{{p}}}$')
+    if len(_present_wms_early) > 1:
+        for m_idx, wm in enumerate(weight_methods):
+            if wm not in sweep:
+                continue
+            st = _wm_style(wm)
+            _mfc_leg = 'k' if st['mfc'] is None else _face('k')
+            leg_h.append(Line2D([0], [0], color='k', lw=2.0 if st['mfc'] is None else 1.8,
+                                 ls=st['ls'], marker=st['mk'],
+                                 ms=_ms, mfc=_mfc_leg, mew=st['mew']))
+            leg_l.append(wm)
+    ax.legend(leg_h, leg_l, loc='best', frameon=False, ncol=2, fontsize=11, handlelength=2.5)
+    # Conversion/TOTAL subplot gets its own small legend (method encoding already
+    # explained in the plot above).
+    chk_h = [Line2D([0], [0], color='black', lw=2.0),
+             Line2D([0], [0], color='tab:gray', lw=1.5)]
+    chk_l = ['TOTAL', 'X_conv']
+    ax_chk.legend(chk_h, chk_l, loc='best', frameon=False, fontsize=11)
 
     # ── fs_final subplot ──────────────────────────────────────────────────────
     if ax_fs is not None:
@@ -2673,7 +3118,7 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
                 continue
             st = _wm_style(wm)
             s = sweep[wm]
-            _mfc_fs = 'black' if st['mfc'] is None else 'none'
+            _mfc_fs = 'black' if st['mfc'] is None else _face('black')
             ax_fs.plot(s['epsilons'], s['fsb_finals'], st['ls'],
                        marker=st['mk'], color='black',
                        mfc=_mfc_fs, mew=st['mew'], ms=_ms,
@@ -2683,14 +3128,11 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
         ax_fs.set_xticks(10.0 ** _decades.astype(float))
         ax_fs.set_xticklabels([f'$10^{{{d}}}$' for d in _decades])
         ax_fs.xaxis.set_minor_locator(_mticker.NullLocator())
-        ax_fs.set_xlabel('turbulent dissipation rate  ε')
+        ax_fs.set_xlabel('turbulent dissipation rate  ε  (W/kg)')
         ax_fs.set_ylabel('$f_s^*$  (final)')
-        ax_fs.grid(True, alpha=0.3)
-        ax_fs.legend(loc='best', fontsize=8)
+        ax_fs.legend(loc='best', frameon=False, fontsize=11)
 
     fig.tight_layout()
-    if ax_fs is None:
-        fig.subplots_adjust(bottom=0.25)
 
     if save_stem is not None:
         _save_fig(fig, save_stem,
@@ -2763,6 +3205,61 @@ def _save_sweep_csv(sweep, weight_methods, all_products, save_stem):
     print(f"Saved to {path}")
 
 
+def _save_base_case_epsilon_csv(all_base_results, weight_methods, save_stem):
+    """Write the final per-epsilon product fractions (X_<product>, X_conv,
+    TOTAL) from the base-case runs (the config's 'epsilon' list, not the
+    --sweep geomspace) to a CSV -- one row per epsilon, columns suffixed by
+    weight method when more than one ran."""
+    import csv
+    import pathlib as _pathlib
+
+    by_wm = {}
+    for r in all_base_results:
+        closure = r.get('stream1_closure', {})
+        if closure.get('limiting_reactant') is None:
+            continue
+        by_wm.setdefault(r.get('weight_method'), {})[r['m_epsilon']] = closure
+
+    present = [wm for wm in weight_methods if wm in by_wm]
+    if not present:
+        return
+    epsilons = sorted({eps for wm in present for eps in by_wm[wm]})
+
+    all_products = []
+    for wm in present:
+        for closure in by_wm[wm].values():
+            for p in closure['products']:
+                if p not in all_products:
+                    all_products.append(p)
+
+    multi = len(present) > 1
+    header = ['epsilon']
+    for wm in present:
+        suffix = f' ({wm})' if multi else ''
+        header += [f'X_{p}{suffix}' for p in all_products]
+        header += [f'X_conv{suffix}', f'TOTAL{suffix}']
+
+    rows = []
+    for eps in epsilons:
+        row = [eps]
+        for wm in present:
+            closure = by_wm[wm].get(eps)
+            for p in all_products:
+                row.append(closure['per_product_fraction'].get(p, float('nan')) if closure else float('nan'))
+            row.append(closure['conversion'] if closure else float('nan'))
+            row.append(closure['fraction'] if closure else float('nan'))
+        rows.append(row)
+
+    plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+    plots_dir.mkdir(exist_ok=True)
+    path = plots_dir / f'{_pathlib.Path(save_stem).name}_product_fractions_by_epsilon.csv'
+    with open(path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+    print(f"Saved to {path}")
+
+
 def _plot_and_save_clamp_pcts(sweep, weight_methods, save_stem, all_species=None):
     """Separate figure + CSV: per-species clamp % vs ε for each weight method."""
     import csv as _csv
@@ -2781,15 +3278,18 @@ def _plot_and_save_clamp_pcts(sweep, weight_methods, save_stem, all_species=None
     # ── figure: one subplot per method ────────────────────────────────────────
     n_m = len(present)
     fig, axes = plt.subplots(n_m, 1, figsize=(8, 3.5 * n_m), squeeze=False)
-    _pal = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
+    _ms, _lw, _leg_fs = _scaled_marker_lw(8.0, 3.5)
 
     for row, wm in enumerate(present):
         ax = axes[row][0]
         scp = sweep[wm]['sp_clamp_pcts']
         all_sp = sorted(scp)
         for sp in all_sp:
-            ax.plot(epsilons, scp[sp], '-o', color=_sp_color(sp, all_species or [], _pal),
-                    ms=5, lw=1.6, label=sp)
+            ax.plot(epsilons, scp[sp], marker=_sp_marker(sp, all_species or []),
+                    color=_sp_color(sp, all_species or []),
+                    linestyle=_sp_linestyle(sp, all_species or []),
+                    markevery=max(1, len(epsilons) // 15), mfc=_face(_sp_color(sp, all_species or [])),
+                    ms=_ms, lw=_lw, label=sp)
         ax.set_xscale('log')
         ax.set_xticks(10.0 ** _decades.astype(float))
         ax.set_xticklabels([f'$10^{{{d}}}$' for d in _decades])
@@ -2798,8 +3298,7 @@ def _plot_and_save_clamp_pcts(sweep, weight_methods, save_stem, all_species=None
         ax.set_ylabel('% steps clamped')
         ax.set_ylim(bottom=0)
         ax.set_title(wm, fontsize=10)
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8, loc='best')
+        ax.legend(fontsize=_leg_fs, loc='best', frameon=False)
 
     fig.tight_layout()
     _save_fig(fig, save_stem,
@@ -3080,20 +3579,19 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                         species_list, [rxns[i] for i in idx],
                         nu_reactants[:, idx], nu_products[:, idx], Y1, Y2)
                     seg = generate_line_segments(species_list, Y1, Y2, res)
-                return res['fs'], seg['all_reactions']
+                return res['fs'], seg['breakpoints'], seg['all_reactions']
 
             bf_fs, bf_distinguishing, bf_sizes, bf_misses = [], [], [], []
-            bf_c0, bf_c1, bf_cfs = [], [], []   # per subset: {sp: value}
+            bf_bp_list, bf_segs = [], []   # per subset: own breakpoints, {sp: segment list}
             _ok = True
             for k, s in enumerate(bf_subs):
-                fs_s, segs_s = _ana(s)
+                fs_s, bps_s, segs_s = _ana(s)
                 if fs_s is None:
                     _ok = False
                     break
                 bf_fs.append(fs_s)
-                bf_c0.append({sp: _eval_segments(segs_s[sp], 0.0) for sp in species_list})
-                bf_c1.append({sp: _eval_segments(segs_s[sp], 1.0) for sp in species_list})
-                bf_cfs.append({sp: _eval_segments(segs_s[sp], fs_s) for sp in species_list})
+                bf_bp_list.append(bps_s)
+                bf_segs.append(segs_s)
                 # Distinguishing products that weight this subset: products it
                 # makes that the OTHER blended subsets do not.
                 _others = set().union(*[_prods_by_subset[o] for o in bf_subs if o != s]) \
@@ -3107,6 +3605,25 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                 print(f"[{weight_method}]   [blend] blend_subsets blend of subsets {bf_subs}: " + "; ".join(
                     f"subset {bf_subs[k]} (fs={bf_fs[k]:.4f}, distinguishing "
                     f"{[species_list[i] for i in bf_distinguishing[k]]})" for k in range(bf_n)))
+                # Each blended subset's own profile (breakpoints, segment values)
+                # is fixed -- computed once here from stoichiometry alone, not
+                # per time-step.  Only the blend WEIGHTS w[k](t) vary with time
+                # (see _blendfs_weights), so rather than collapsing each subset
+                # to 3 control points (f=0, its own fs, f=1) and losing any
+                # interior kink a catalytic reaction needs (e.g. the near-f=0
+                # step where a catalyst confined to one stream first becomes
+                # present), take the union of every blended subset's FULL
+                # breakpoint set once, and precompute each subset's value at
+                # every point in that union once -- then each step's blended
+                # profile is just a weighted sum (bf_vals[sp] @ w) over this
+                # fixed grid, no re-evaluation needed.
+                bf_bp = np.array(sorted(set().union(*[set(np.round(bp, 12)) for bp in bf_bp_list])))
+                bf_n_bp = len(bf_bp)
+                # bf_vals[sp] has shape (bf_n_bp, bf_n): value of subset k's own
+                # profile at each unioned breakpoint.
+                bf_vals = {sp: np.array([[_eval_segments(bf_segs[k][sp], f) for k in range(bf_n)]
+                                         for f in bf_bp])
+                          for sp in species_list}
         if not blendfs_ok:
             if blend_subsets is None:
                 print(f"[{weight_method}]   [blend] blend_fs requires 'blend_subsets' "
@@ -3227,38 +3744,50 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     def _rates_blendfs(alpha_t, beta_t, ab, a_over_ab, y_active):
         w, fsb = _blendfs_weights(y_active)
 
-        # Betainc table at the blend's breakpoints [0, fsb, 1].
-        bp = np.array([0.0, fsb, 1.0])
-        Bt = np.empty((_max_deg + 1, 3))
+        # Betainc table over the FULL union of every blended subset's own
+        # breakpoints (bf_bp, fixed -- precomputed above), not just
+        # [0, fsb, 1].  Collapsing to 3 points discards any interior kink a
+        # catalytic reaction needs (e.g. the near-f=0 step where a catalyst
+        # confined to one stream first becomes present), smearing it into a
+        # long diagonal and biasing E[B]; using the full grid instead keeps
+        # each blended subset's real shape intact.
+        Bt = np.empty((_max_deg + 1, bf_n_bp))
         for k in range(_max_deg + 1):
-            Bt[k] = betainc(alpha_t + k, beta_t, bp)
+            Bt[k] = betainc(alpha_t + k, beta_t, bf_bp)
         rat = np.empty(_max_deg + 1)
         rat[0] = 1.0
         for d in range(1, _max_deg + 1):
             rat[d] = rat[d - 1] * (alpha_t + (d - 1)) / (ab + (d - 1))
 
+        n_bseg = bf_n_bp - 1
         # Per active species: C_i = B_i + (M_i - B_i)·λ, where M_i is the no-reaction
-        # line and B_i the fs-rule blend (kink at fsb).  λ = (y_i - E[B_i])/(E[M_i] - E[B_i])
-        # matches the mean so E[C_i] = y_i.  Store the two segments of C_i.
+        # line and B_i the blended limit (piecewise-linear over bf_bp).
+        # λ = (y_i - E[B_i])/(E[M_i] - E[B_i]) matches the mean so E[C_i] = y_i.
         Cseg = {}
         # Per-species info for recording/plotting:
-        #   info[sp] = (E[B_i], raw λ, clamped λ, v0, vfs, v1)
-        # where v0/vfs/v1 are the blend B_i values at f=0, fs_blend, f=1.
+        #   info[sp] = (E[B_i], raw λ, clamped λ, v0, vfs, v1, v_arr)
+        # v0/v1/vfs (values at f=0, fs_blend, f=1) kept for existing
+        # consumers; v_arr is the full blended value at every bf_bp point,
+        # for the limit-grid plot's fuller-resolution curve.
         info = {}
         for ai, i in enumerate(active_indices):
             sp = species_list[i]
-            v0 = sum(w[k] * bf_c0[k][sp] for k in range(bf_n))
-            v1 = sum(w[k] * bf_c1[k][sp] for k in range(bf_n))
-            vfs = (1.0 - fsb) * sum(w[k] * bf_cfs[k][sp] / (1.0 - bf_fs[k]) for k in range(bf_n))
-            Bs0 = (vfs - v0) / fsb
-            Bi0 = v0
-            Bs1 = (v1 - vfs) / (1.0 - fsb)
-            Bi1 = vfs - Bs1 * fsb
-            e_B = (Bs0 * a_over_ab * (Bt[1, 1] - Bt[1, 0]) + Bi0 * (Bt[0, 1] - Bt[0, 0])
-                   + Bs1 * a_over_ab * (Bt[1, 2] - Bt[1, 1]) + Bi1 * (Bt[0, 2] - Bt[0, 1]))
+            v_arr = bf_vals[sp] @ w    # shape (bf_n_bp,) -- blend of fixed per-subset values
             mM = float(Y1[i] - Y2[i])     # no-reaction line slope
             mB = float(Y2[i])             # ... and intercept
             e_M = mM * a_over_ab + mB
+
+            Bslopes = np.empty(n_bseg)
+            Bints = np.empty(n_bseg)
+            e_B = 0.0
+            for s in range(n_bseg):
+                fa, fb = bf_bp[s], bf_bp[s + 1]
+                df = fb - fa
+                sl = (v_arr[s + 1] - v_arr[s]) / df if df > 1e-15 else 0.0
+                it = v_arr[s] - sl * fa
+                Bslopes[s], Bints[s] = sl, it
+                e_B += sl * a_over_ab * (Bt[1, s + 1] - Bt[1, s]) + it * (Bt[0, s + 1] - Bt[0, s])
+
             yi = max(float(y_active[ai]), 0.0)
             denom = e_M - e_B
             lam0 = (yi - e_B) / denom if abs(denom) > 1e-9 * (abs(e_M) + abs(e_B) + 1.0) else 1.0
@@ -3266,15 +3795,17 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             if (lam0 < -1e-9 or lam0 > 1.0 + 1e-9) and _blendfs_lam_reported[0] < 10:
                 print(f"[clamp]  {sp}: lam0={lam0:.4f}  lam={lam:.4f}")
                 _blendfs_lam_reported[0] += 1
-            info[sp] = (e_B, lam0, lam, v0, vfs, v1)
-            Cseg[sp] = ((lam * mM + (1 - lam) * Bs0, lam * mB + (1 - lam) * Bi0),
-                        (lam * mM + (1 - lam) * Bs1, lam * mB + (1 - lam) * Bi1))
+            v0, v1 = float(v_arr[0]), float(v_arr[-1])
+            vfs = float(np.interp(fsb, bf_bp, v_arr))
+            info[sp] = (e_B, lam0, lam, v0, vfs, v1, v_arr)
+            Cseg[sp] = [(lam * mM + (1 - lam) * Bslopes[s], lam * mB + (1 - lam) * Bints[s])
+                        for s in range(n_bseg)]
         rates = np.zeros(n_rxns)
         for j, reactants in enumerate(rxn_reactants):
             if not reactants:
                 continue
             r_j = 0.0
-            for segk in range(2):                       # segments [0,fsb] and [fsb,1]
+            for segk in range(n_bseg):
                 poly = np.array([k_vals[j]])
                 for i, order in reactants:
                     s_i, b_i = Cseg[species_list[i]][segk]
@@ -3775,6 +4306,11 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     # blend_fs: blend profile params per species over time [v0, vfs, v1, λ] (for
     # drawing the M / B / C curves on the snapshot plots).
     bf_prof = {sp: np.full((n_t, 4), np.nan) for sp in sp_profiles} if _bf_diag else {}
+    # blend_fs: the FULL blended value at every point in bf_bp (the fixed
+    # union of every blended subset's own breakpoints), per species over
+    # time -- for the limit-grid plot, which needs the fuller resolution
+    # v0/vfs/v1 alone can't represent (a catalytic reaction's interior kink).
+    bf_prof_full = {sp: np.full((n_t, bf_n_bp), np.nan) for sp in sp_profiles} if _bf_diag else {}
     # ray_limit diagnostics: the time-varying complete-reaction fs, the
     # per-species single-kink limit params [v0, vfs, v1, λ] (for the snapshot
     # M/B/C curves), and the same clamp tally.
@@ -3806,9 +4342,10 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
             limit_avgs[sp][k, :len(ev)] = ev
         if _bf_diag:
             bf_w_t[k], bf_fsb_t[k] = _blendfs_weights(y_full[k, active_indices])
-            for sp, (e_B, lr, lam, v0, vfs, v1) in sp_w_k.items():   # blend_fs info
+            for sp, (e_B, lr, lam, v0, vfs, v1, v_arr) in sp_w_k.items():   # blend_fs info
                 blend_avgs[sp][k] = e_B
                 bf_prof[sp][k] = (v0, vfs, v1, lam)
+                bf_prof_full[sp][k] = v_arr
                 _band = abs(e_B - y0_full[sp_to_global[sp]])   # |E[B]-E[M]|, E[M]=y0
                 if lr < -1e-9 and (-lr) * _band > _clamp_atol:
                     bf_clamp_hi[sp] += 1
@@ -4001,10 +4538,66 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         print(f"[{weight_method}]     {'TOTAL':<7s} {'':>12s} {'':>20s} "
               f"fraction={stream1_closure['fraction']:.6f}")
 
+    # Mathematical check: the conserved scalar f_conserved(t), built from the
+    # ODE-solved means of the stream-1 and stream-2 limiting reactants (L1,
+    # L2), each scaled by its own selectivity-ray component
+    # nu_i(t) = y_i(0) - y_i(t) (the amount of i consumed so far -- all ray
+    # components sampled at the same t):
+    #   f_conserved(t) = (y_L1(t)/nu_L1(t) - y_L2(t)/nu_L2(t) + kappa2(t))
+    #                     / (kappa1(t) + kappa2(t))
+    #   kappa1(t) = Y1[L1]/nu_L1(t),  kappa2(t) = Y2[L2]/nu_L2(t)
+    # This is the same kappa1/kappa2 construction _raylimit_limit uses to get
+    # its closed-form fs = kappa2/(kappa1+kappa2); here it's evaluated from
+    # the actual solved trajectory at every t as a mass-balance sanity check
+    # -- it should track mean_f throughout the run.  At t=0, nu1=nu2=0
+    # exactly (0/0); resolved via the L'Hopital limit, substituting the
+    # initial mass-action consumption RATE of L1/L2 (the same fallback ray
+    # direction _selectivity_ray uses near y0) for the zero accumulated
+    # extent -- kappa_i(0) = Y_i[Li] / (initial rate of Li).
+    L1_fc = _stream1_limiting_index(Y1, nu_reactants, Y2, nu_products)
+    L2_fc = _stream1_limiting_index(Y2, nu_reactants, Y1, nu_products)
+    f_conserved = None
+    if L1_fc is not None and L2_fc is not None and L1_fc != L2_fc:
+        nu1_t = y_full[0, L1_fc] - y_full[:, L1_fc]
+        nu2_t = y_full[0, L2_fc] - y_full[:, L2_fc]
+        _fc_valid = (nu1_t > 0) & (nu2_t > 0)
+        f_conserved = np.full(len(result.t), np.nan)
+        if _fc_valid.any():
+            kappa1_t = Y1[L1_fc] / nu1_t[_fc_valid]
+            kappa2_t = Y2[L2_fc] / nu2_t[_fc_valid]
+            f_conserved[_fc_valid] = (
+                (y_full[_fc_valid, L1_fc] / nu1_t[_fc_valid]
+                 - y_full[_fc_valid, L2_fc] / nu2_t[_fc_valid] + kappa2_t)
+                / (kappa1_t + kappa2_t))
+
+        if (np.isclose(result.t[0], 0.0) and int(L1_fc) in global_to_active
+                and int(L2_fc) in global_to_active):
+            rj0 = _massaction_rates(y_full[0, active_indices], uniform_k=raylimit_initial_ray_k)
+            if float(rj0.sum()) > 1e-300:
+                d_rate0 = nu_net_active @ rj0
+                d1 = -float(d_rate0[global_to_active[int(L1_fc)]])
+                d2 = -float(d_rate0[global_to_active[int(L2_fc)]])
+                denom0 = Y1[L1_fc] * d2 + Y2[L2_fc] * d1
+                if d1 > 0.0 and d2 > 0.0 and abs(denom0) > 1e-300:
+                    f_conserved[0] = (
+                        (y_full[0, L1_fc] * d2 - y_full[0, L2_fc] * d1 + Y2[L2_fc] * d1)
+                        / denom0)
+                    _fc_valid[0] = True
+
+        if _fc_valid.any():
+            _fc_err = np.abs(f_conserved[_fc_valid] - mean_f)
+            print(f"[{weight_method}]   [check] f_conserved "
+                  f"(L1={species_list[L1_fc]}, L2={species_list[L2_fc]}): "
+                  f"mean_f={mean_f:.6f}, "
+                  f"range=[{np.min(f_conserved[_fc_valid]):.6f}, "
+                  f"{np.max(f_conserved[_fc_valid]):.6f}], "
+                  f"max|error|={np.max(_fc_err):.3g}")
+
     out = {
         't': result.t,
         'y': y_full,
         'stream1_closure': stream1_closure,
+        'f_conserved': f_conserved,
         'rates': rates_out,
         'rxn_labels': rxn_labels,
         'species': species_list,
@@ -4033,6 +4626,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         out['blendfs'] = {
             'subs': list(bf_subs), 'fs': list(bf_fs), 'misses': list(bf_misses),
             'w': bf_w_t, 'fsb': bf_fsb_t, 'prof': bf_prof,
+            'bp': bf_bp, 'prof_full': bf_prof_full,
             'Y1': Y1, 'Y2': Y2,
             'clamp_below_M': dict(bf_clamp_lo), 'clamp_above_B': dict(bf_clamp_hi),
         }
@@ -4162,6 +4756,7 @@ def plot_ode_limit_averages(ode_result, save_stem=None):
     fig, axes = plt.subplots(n_rows, n_cols,
                              figsize=(4 * n_cols, 3 * n_rows + 0.5),
                              squeeze=False)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.0, 3.0)
 
     for plot_idx, sp in enumerate(active_species):
         row, col = divmod(plot_idx, n_cols)
@@ -4188,12 +4783,17 @@ def plot_ode_limit_averages(ode_result, save_stem=None):
                 w = _linear_interp_weights(ev, av)
                 active_mask[k] = w > 1e-10
 
+        _mk_every_la = max(1, len(t) // 15)
+        _MAX_LABEL_LA = 15
         for n, lbl in enumerate(labels):
-            color = _tab_palette[n % len(_tab_palette)]
-            ax.plot(t, avgs[:, n], lw=1.0, color=color, label=lbl, alpha=0.4)
+            color, ls, mk = _tab_palette[n % len(_tab_palette)]
+            _disp = lbl if len(lbl) <= _MAX_LABEL_LA else lbl[:_MAX_LABEL_LA - 3] + '...'
+            ax.plot(t, avgs[:, n], lw=_lw * (1.0 / 1.5), color=color, linestyle=ls, marker=mk, mfc=_face(color),
+                    markevery=_mk_every_la, ms=_ms, label=_disp, alpha=0.4)
             # Bold overlay where this profile is in the active pair
             y_bold = np.where(active_mask[:, n], avgs[:, n], np.nan)
-            ax.plot(t, y_bold, lw=2.5, color=color)
+            ax.plot(t, y_bold, lw=_lw * (2.5 / 1.5), color=color, linestyle=ls, marker=mk, mfc=_face(color),
+                    markevery=_mk_every_la, ms=_ms + 1)
         # beta-averaged complete-reaction limit E[B_i] — black solid (drawn first / underneath)
         if sp in blend_avgs:
             _elbl = {'ray_limit': 'ray limit E[B]'}.get(weight_method, 'blended limit E[B]')
@@ -4214,7 +4814,7 @@ def plot_ode_limit_averages(ode_result, save_stem=None):
         ax.set_xlabel('t (s)', fontsize=8)
         ax.set_ylabel('beta-avg of limit', fontsize=8)
         ax.tick_params(labelsize=7)
-        ax.legend(fontsize=6, loc='best', ncol=max(1, len(labels) // 6))
+        ax.legend(fontsize=_leg_fs, loc='best', frameon=False, ncol=max(1, len(labels) // 6))
 
     for plot_idx in range(n_plot, n_rows * n_cols):
         row, col = divmod(plot_idx, n_cols)
@@ -4304,7 +4904,7 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
         sp_global_idx = species_list.index(sp)
         profiles = dict(sp_profiles[sp])
         profile_list = list(profiles.items())
-        colors = [_tab_palette[i % len(_tab_palette)] for i in range(len(profile_list))]
+        styles = [_tab_palette[i % len(_tab_palette)] for i in range(len(profile_list))]
 
         for col, (t_idx, col_label) in enumerate(zip(snap_idxs, snap_labels)):
             ax = axes[row][col]
@@ -4317,13 +4917,21 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
             average_val = max(float(y_arr[t_idx, sp_global_idx]), 0.0)
             cell_title = f'{sp}  {col_label}'
             if _bf is not None and sp in _bf['prof']:
-                # blend_fs: show M(f), B(f) and the interpolated C(f).
+                # blend_fs: show M(f), the FULL blended B(f) (multi-segment
+                # over bf['bp'], not just the single-kink v0/vfs/v1 -- a
+                # catalyzed reaction's near-boundary kink needs the fuller
+                # resolution) and the interpolated C(f)=B+(M-B)·λ.
                 v0, vfs, v1, lam = _bf['prof'][sp][t_idx]
                 fsb = float(_bf['fsb'][t_idx])
                 Mi = float(_bf['Y1'][sp_global_idx]) * _bf_fgrid + \
                     float(_bf['Y2'][sp_global_idx]) * (1.0 - _bf_fgrid)
+                _bprof = None
+                if 'bp' in _bf and sp in _bf.get('prof_full', {}):
+                    _v_arr = _bf['prof_full'][sp][t_idx]
+                    if np.all(np.isfinite(_v_arr)):
+                        _bprof = (_bf['bp'], _v_arr)
                 _draw_blendfs_cell(ax, cell_title, _bf_fgrid, Mi, v0, vfs, v1, fsb, lam,
-                                   alpha_t, beta_t, average_val, xlim=f_xlim)
+                                   alpha_t, beta_t, average_val, xlim=f_xlim, B_profile=_bprof)
             elif _rl is not None and sp in _rl['prof']:
                 # ray_limit: draw the FULL staged complete-reaction limit B(f)
                 # (multi-segment for catalytic systems) and C(f)=B+(M-B)·λ.
@@ -4341,7 +4949,7 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
                                    fs_label='fs_ray', B_profile=_bprof)
             else:
                 _draw_cw_cell(ax, cell_title, profiles, alpha_t, beta_t,
-                              average_val, weight_method, colors, t=t_snap, xlim=f_xlim)
+                              average_val, weight_method, styles, t=t_snap, xlim=f_xlim)
 
             if row == 0 and _ray_eqs is not None and _ray_eqs[col] is not None:
                 _lhs, _rhs = _ray_eqs[col].split(' → ')
@@ -4411,11 +5019,11 @@ def _draw_blendfs_cell(ax, title, f_grid, Mi, v0, vfs, v1, fsb, lam,
 
     ax.plot(f_grid, Mi, color='grey', lw=1.4, ls='--', label='no reaction M')
     ax.plot(f_grid, Bf, color='black', lw=1.8, label='blend B')
-    ax.plot(f_grid, Cf, color='steelblue', lw=2.0, label='species C')
-    ax.axhline(average_val, color='orange', lw=1.5, ls=':', zorder=4)
+    ax.plot(f_grid, Cf, color=CB_PALETTE[0], lw=2.0, label='species C')
+    ax.axhline(average_val, color=CB_PALETTE[1], lw=1.5, ls=':', zorder=4)
     ax.annotate(f'average={average_val:.4g}', xy=(0.97, average_val),
                 xycoords=('axes fraction', 'data'), fontsize=6, ha='right',
-                va='bottom', color='orange', zorder=7,
+                va='bottom', color=CB_PALETTE[1], zorder=7,
                 bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.7, ec='none'))
 
     # Beta-average of C(f): equals 'average' when the mean is matched, diverges
@@ -4438,10 +5046,10 @@ def _draw_blendfs_cell(ax, title, f_grid, Mi, v0, vfs, v1, fsb, lam,
         e_B = (_beta_segment_integral(Bs0, Bi0, 0.0, fsb, alpha, beta_p)
                + _beta_segment_integral(Bs1, Bi1, fsb, 1.0, alpha, beta_p))
     e_C = lam * e_M + (1 - lam) * e_B
-    ax.axhline(e_C, color='steelblue', lw=1.5, ls='-.', zorder=4)
+    ax.axhline(e_C, color=CB_PALETTE[0], lw=1.5, ls='-.', zorder=4)
     ax.annotate(f'E[C]={e_C:.4g}', xy=(0.03, e_C),
                 xycoords=('axes fraction', 'data'), fontsize=6, ha='left',
-                va='top', color='steelblue', zorder=7,
+                va='top', color=CB_PALETTE[0], zorder=7,
                 bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.7, ec='none'))
 
     f_dense = np.linspace(1e-4, 1.0 - 1e-4, 100)
@@ -4456,7 +5064,6 @@ def _draw_blendfs_cell(ax, title, f_grid, Mi, v0, vfs, v1, fsb, lam,
     ax.set_title(f'{title}  (λ={lam:.2f}, {fs_label}={fsb:.3f})', fontsize=8)
     ax.set_xlabel('f', fontsize=8)
     ax.set_ylabel('C(f)', fontsize=8)
-    ax.grid(True, alpha=0.3)
     if xlim is not None:
         ax.set_xlim(xlim)
 
@@ -4468,9 +5075,11 @@ def _beta_segment_integral(slope, intercept, lo, hi, alpha, beta_p):
     return slope * (alpha / (alpha + beta_p)) * dI1 + intercept * dI0
 
 
-def _draw_cw_cell(ax, title, profiles, alpha, beta_p, average_val, weight_method, colors, t=None, xlim=None):
+def _draw_cw_cell(ax, title, profiles, alpha, beta_p, average_val, weight_method, styles, t=None, xlim=None):
     """Draw one beta-weighted C_w subplot. Returns (weights, e_cw)."""
 
+    # Cell size matches plot_ode_beta_snapshots's grid (figsize=(4.5*ncols, 3.5*nrows)).
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.5, 3.5)
     profile_list = list(profiles.items())
     _MAX_LABEL = 20
 
@@ -4491,25 +5100,26 @@ def _draw_cw_cell(ax, title, profiles, alpha, beta_p, average_val, weight_method
 
     # Horizontal lines at beta-weighted averages, with labels.
     # Active-pair profiles are drawn with a thicker line.
-    # When xlim is set, place annotations within the visible range.
-    _f0, _f1 = (xlim[0], xlim[1]) if xlim is not None else (0.1, 0.9)
-    _margin = 0.05 * (_f1 - _f0)
-    fracs = np.linspace(_f0 + _margin, _f1 - _margin, max(len(profile_list), 1))
     for i, (lbl, _) in enumerate(profile_list):
         val = avgs[lbl]
         f_g = np.array([0.0, 1.0])
-        lw = 2.5 if i in _active else 1.2
-        ax.plot(f_g, [val, val], color=colors[i], lw=lw)
+        lw = _lw * (2.5 / 1.5) if i in _active else _lw * (1.2 / 1.5)
+        color, ls, mk = styles[i]
         display = lbl if len(lbl) <= _MAX_LABEL else lbl[:_MAX_LABEL - 3] + '...'
-        _annotate_species_lines(ax, f_g, [(display, colors[i], np.array([val, val]))], [fracs[i]])
+        ax.plot(f_g, [val, val], color=color, linestyle=ls, marker=mk, mfc=_face(color),
+                ms=_ms, lw=lw, label=display)
+    if len(profile_list) > 1:
+        ax.legend(loc='best', frameon=False, fontsize=_leg_fs)
     _f_cw = _profile_f_grid(profile_list)
     # Draw the actual C(f) profiles for the bracketing pair (the active, non-zero
     # weight limits) so the weighted blend is seen to interpolate between them.
     for i in _active:
         _w_one = np.zeros(len(profile_list))
         _w_one[i] = 1.0
+        color, ls, mk = styles[i]
         ax.plot(_f_cw, _eval_cw_on_grid(profile_list, _w_one, _f_cw),
-                color=colors[i], lw=1.6, ls='-', alpha=0.9, zorder=4)
+                color=color, lw=_lw * (1.6 / 1.5), ls=ls, marker=mk, mfc=_face(color),
+                markevery=max(1, len(_f_cw) // 15), ms=_ms + 1, alpha=0.9, zorder=4)
     y_weighted = _eval_cw_on_grid(profile_list, weights, _f_cw)
 
     ax.plot(_f_cw, y_weighted, color='black', lw=1.8, ls='--', zorder=5)
@@ -4553,7 +5163,6 @@ def _draw_cw_cell(ax, title, profiles, alpha, beta_p, average_val, weight_method
 
     ax.set_xlabel('f', fontsize=8)
     ax.set_ylabel('E[Y]', fontsize=8)
-    ax.grid(True, alpha=0.3)
     if xlim is not None:
         ax.set_xlim(xlim)
 
@@ -4599,29 +5208,34 @@ def plot_blendfs_diagnostics(ode_result, save_stem=None):
     subs, fs, misses, W = bf['subs'], bf['fs'], bf['misses'], bf['w']
     n = len(subs)
     _tab = _build_tab_palette()
-    colors = [_tab[i % len(_tab)] for i in range(n)]
+    styles = [_tab[i % len(_tab)] for i in range(n)]
 
     fig, ax = plt.subplots(figsize=(8, 5))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(8, 5)
+    _mk_every_bf = max(1, len(t) // 15)
     for k in range(n):
-        ax.plot(t, W[:, k], color=colors[k], lw=1.8,
+        color, ls, mk = styles[k]
+        ax.plot(t, W[:, k], color=color, linestyle=ls, marker=mk, mfc=_face(color),
+                markevery=_mk_every_bf, ms=_ms, lw=_lw,
                 label=f"w (subset {subs[k]}, misses {misses[k]})")
     ax.set_xlabel('t (s)', fontsize=9)
     ax.set_ylabel('blend weight', fontsize=9)
     ax.set_ylim(-0.02, 1.02)
-    ax.grid(True, alpha=0.3)
 
     ax2 = ax.twinx()
     ax2.plot(t, bf['fsb'], color='black', lw=2.0, label='fs_blend')
     for k in range(n):
-        ax2.axhline(fs[k], color=colors[k], ls=':', alpha=0.6)
+        color, _, _ = styles[k]
+        ax2.axhline(fs[k], color=color, ls=':', alpha=0.6)
     _annotate_fs_endpoints(ax2, t, bf['fsb'])
+    _fs_ylim = _fs_axis_ylim(bf['fsb'])
+    if _fs_ylim is not None:
+        ax2.set_ylim(*_fs_ylim)
     ax2.set_ylabel('fs', fontsize=9)
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    # Legend below the axes so it never overlaps the fs end-point annotations.
-    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper center',
-              bbox_to_anchor=(0.5, -0.12), ncol=min(3, len(l1) + len(l2)))
+    _fit_legend_avoiding_curves(ax, h1 + h2, l1 + l2, _leg_fs, other_axes=(ax2,), loc='upper left')
     ax.set_title(f'blend_fs: {n} one-short limits — weights & blended fs vs time  '
                  f'(ε={m_epsilon:.4g})', fontsize=10)
     fig.tight_layout()
@@ -4689,16 +5303,28 @@ def plot_raylimit_diagnostics(ode_result, save_stem=None):
     y0_active = mean_f * Y1[active_indices] + (1.0 - mean_f) * Y2[active_indices]
     d = y_full[:, active_indices] - y0_active[None, :]
 
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
+
+    # Detect any species whose |d| dwarfs every OTHER SPECIES FED BY THE SAME
+    # STREAM (e.g. a solvent fed in vast excess, like water in the acetal
+    # case); scale it down to ~1000.  A stream-1 concentrate is never
+    # compared against stream-2 species (or vice versa).
+    gmax = {s: float(np.max(np.abs(d[:, k]))) for k, s in enumerate(active_indices)}
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: Y1[s] > 0 for s in active_indices})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    _yv = lambda s, arr: arr / div_of[s] if s in div_of else arr
 
     fig, ax = plt.subplots(figsize=(8, 5))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(8, 5)
+    _mk_every = max(1, len(t) // 15)
     for k, s in enumerate(active_indices):
-        ax.plot(t, d[:, k], color=color_map[s], lw=1.8, label=species_list[s])
+        ax.plot(t, _yv(s, d[:, k]), color=color_map[s], linestyle=ls_map[s], lw=_lw,
+                marker=mk_map[s], markevery=_mk_every, mfc=_face(color_map[s]), ms=_ms, label=_lbl(s))
     ax.axhline(0.0, color='grey', lw=1.0, ls='--', zorder=1)
     ax.set_xlabel('t (s)', fontsize=9)
     ax.set_ylabel('d = y − y0  (consumed < 0, produced > 0)', fontsize=9)
-    ax.grid(True, alpha=0.3)
 
     ax2 = ax.twinx()
     ax2.plot(t, rl['fsb'], color='black', lw=2.0, label='fs (complete-reaction)')
@@ -4710,9 +5336,7 @@ def plot_raylimit_diagnostics(ode_result, save_stem=None):
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    # Legend below the axes so it never overlaps the fs end-point annotations.
-    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper center',
-              bbox_to_anchor=(0.5, -0.12), ncol=min(6, len(l1) + len(l2)))
+    _fit_legend_avoiding_curves(ax, h1 + h2, l1 + l2, _leg_fs, other_axes=(ax2,), loc='upper left')
     ax.set_title(f'ray_limit: selectivity ray d(t) & complete-reaction fs vs time  '
                  f'(ε={m_epsilon:.4g})', fontsize=10)
     fig.tight_layout()
@@ -4806,8 +5430,7 @@ def plot_raylimit_rotation(ode_result, save_stem=None):
         ax1.annotate(f't_99={t99:.3g} s', xy=(t99, 8.1), xytext=(5, 8), textcoords='offset points',
                     fontsize=8, bbox=dict(boxstyle='round,pad=0.15', fc='white', ec='none', alpha=0.75))
     ax1.set_ylabel('angle to final ray (°)', fontsize=9)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=7, loc='upper right')
+    ax1.legend(fontsize=7, loc='upper right', frameon=False)
     ax1.set_title(f'ray_limit: selectivity-ray rotation vs time  (ε={m_epsilon:.4g},  '
                  f'τ_s={tau_s:.4g} s)', fontsize=10)
 
@@ -4815,7 +5438,6 @@ def plot_raylimit_rotation(ode_result, save_stem=None):
     ax2.plot(t_mid[step_finite], step_angle[step_finite], color='indianred', lw=1.2)
     ax2.set_ylabel('step-to-step\nrotation (°)', fontsize=9)
     ax2.set_xlabel('t (s)', fontsize=9)
-    ax2.grid(True, alpha=0.3)
     fig.tight_layout()
 
     if save_stem is not None:
@@ -4867,16 +5489,32 @@ def plot_raylimit_selectivity(ode_result, save_stem=None):
     d = y_full[:, active_indices] - y0_active[None, :]
     x = -d[:, ref_pos]
 
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    # Detect any (non-reference) species whose |d| dwarfs every OTHER SPECIES
+    # FED BY THE SAME STREAM (e.g. a solvent fed in vast excess, like water
+    # in the acetal case); scale it down to ~1000 -- applied to d before the
+    # slope/R² fits below, so the dashed best-fit lines and annotations stay
+    # consistent with the curves.
+    other_indices = [s for s in active_indices if s != ref]
+    gmax = {s: float(np.max(np.abs(d[:, k]))) for k, s in enumerate(active_indices) if s != ref}
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: Y1[s] > 0 for s in other_indices})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    div = np.array([div_of.get(s, 1.0) for s in active_indices])
+    d = d / div[None, :]
+
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
 
     fig, ax = plt.subplots(figsize=(7, 6))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(7, 6)
     other_cols = [k for k, s in enumerate(active_indices) if s != ref]
     label_info = []
+    _mk_every = max(1, len(x) // 15)
     for k, s in enumerate(active_indices):
         if s == ref:
             continue
-        ax.plot(x, d[:, k], color=color_map[s], lw=1.8, label=species_list[s])
+        ax.plot(x, d[:, k], color=color_map[s], linestyle=ls_map[s], lw=_lw,
+                marker=mk_map[s], markevery=_mk_every, mfc=_face(color_map[s]), ms=_ms, label=_lbl(s))
         xx = float(np.sum(x * x))
         if xx > 0:
             slope = float(np.sum(x * d[:, k]) / xx)
@@ -4914,8 +5552,7 @@ def plot_raylimit_selectivity(ode_result, save_stem=None):
     ax.set_xlabel(f'−d_{species_list[ref]}  (extent of {species_list[ref]} consumed)',
                  fontsize=9)
     ax.set_ylabel('d = y − y0  (other species)', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10, loc='best', ncol=min(3, len(active_indices) - 1))
+    ax.legend(fontsize=_leg_fs, loc='best', frameon=False, ncol=min(3, len(active_indices) - 1))
     ax.set_title(f'ray_limit: selectivity vs. {species_list[ref]} consumed  '
                  f'(ε={m_epsilon:.4g})', fontsize=10)
     fig.tight_layout()
@@ -4971,16 +5608,32 @@ def plot_raylimit_early_selectivity(ode_result, conversion_cutoff=0.20, save_ste
     x = x_full[mask]
     fsb_early = fsb[mask]
 
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    # Detect any (non-reference) species whose |d| dwarfs every OTHER SPECIES
+    # FED BY THE SAME STREAM (e.g. a solvent fed in vast excess, like water
+    # in the acetal case); scale it down to ~1000 -- applied to d before the
+    # slope/R² fits below, so the dashed best-fit lines and annotations stay
+    # consistent with the curves.
+    other_indices = [s for s in active_indices if s != ref]
+    gmax = {s: float(np.max(np.abs(d[:, k]))) for k, s in enumerate(active_indices) if s != ref}
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: Y1[s] > 0 for s in other_indices})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    div = np.array([div_of.get(s, 1.0) for s in active_indices])
+    d = d / div[None, :]
+
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
 
     fig, ax = plt.subplots(figsize=(7, 6))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(7, 6)
     other_cols = [k for k, s in enumerate(active_indices) if s != ref]
     label_info = []
+    _mk_every = max(1, len(x) // 15)
     for k, s in enumerate(active_indices):
         if s == ref:
             continue
-        ax.plot(x, d[:, k], color=color_map[s], lw=1.8, label=species_list[s])
+        ax.plot(x, d[:, k], color=color_map[s], linestyle=ls_map[s], lw=_lw,
+                marker=mk_map[s], markevery=_mk_every, mfc=_face(color_map[s]), ms=_ms, label=_lbl(s))
         xx = float(np.sum(x * x))
         if xx > 0:
             slope = float(np.sum(x * d[:, k]) / xx)
@@ -5018,14 +5671,15 @@ def plot_raylimit_early_selectivity(ode_result, conversion_cutoff=0.20, save_ste
     ax.set_xlabel(f'−d_{species_list[ref]}  (extent of {species_list[ref]} consumed)',
                  fontsize=9)
     ax.set_ylabel('d = y − y0  (other species)', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=10, loc='upper left', ncol=min(3, len(active_indices) - 1))
 
     ax2 = ax.twinx()
-    ax2.plot(x, fsb_early, color='black', lw=2.0, ls='-', marker='o', ms=3,
+    ax2.plot(x, fsb_early, color='black', lw=2.0, ls='-', marker='o', mfc=_face('black'), ms=_ms,
               label='fs', zorder=5)
     ax2.set_ylabel('fs', fontsize=9)
-    ax2.legend(fontsize=9, loc='lower left')
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    _fit_legend_avoiding_curves(ax, h1 + h2, l1 + l2, _leg_fs, other_axes=(ax2,), loc='upper left')
 
     ax.set_title(f'ray_limit: early selectivity (≤{100.0 * conversion_cutoff:.4g}% '
                  f'conversion of {species_list[ref]})  (ε={m_epsilon:.4g})', fontsize=10)
@@ -5070,8 +5724,9 @@ def plot_raylimit_limit_grid(ode_result, save_stem=None):
     fg = np.linspace(0.0, 1.0, 400)
 
     # Species→colour: based on global species index so colour is consistent across plots.
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
     stream_labels = identify_stream_feeds(Y1, Y2)
     s1 = [s for s in active_indices if stream_labels[s] in (1, 12)]   # twin (right) axis
     s2 = [s for s in active_indices if stream_labels[s] not in (1, 12)]
@@ -5082,34 +5737,38 @@ def plot_raylimit_limit_grid(ode_result, save_stem=None):
             return np.zeros_like(fg)
         return np.interp(fg, bps, rl['limit_B'][k][:, active_indices.index(s)])
 
-    # `/20` scaling for any species whose max dwarfs every other (e.g. solvent).
+    # Scale down any species whose max dwarfs every other species FED BY THE
+    # SAME STREAM (e.g. solvent) to ~1000 -- stream-1 (twin axis) species are
+    # never compared against stream-2 (main axis) species.
     gmax = {s: max(float(np.max(np.abs(_Bcurve(k, s)))) for k in idxs) for s in active_indices}
-    scale_div20 = set()
-    for s in active_indices:
-        others = max((gmax[o] for o in active_indices if o != s), default=0.0)
-        if others > 1e-12 and gmax[s] > 20.0 * others:
-            scale_div20.add(s)
-    _lbl = lambda s: species_list[s] + '/20' if s in scale_div20 else species_list[s]
-    _yv = lambda s, arr: arr / 20.0 if s in scale_div20 else arr
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: s in s1 for s in active_indices})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    _yv = lambda s, arr: arr / div_of[s] if s in div_of else arr
 
     nrows, ncols = 2, 2
     fig, axes = plt.subplots(nrows, ncols, figsize=(7.0 * ncols, 4.5 * nrows),
                              squeeze=False)
-    fr2 = np.linspace(0.15, 0.85, max(len(s2), 1))
-    fr1 = np.linspace(0.15, 0.85, max(len(s1), 1))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(7.0, 4.5)
     for i, k in enumerate(idxs):
         ax = axes[i // ncols][i % ncols]
         for s in s2:
-            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
-        _annotate_species_lines(ax, fg,
-            [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s2], fr2)
+            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s], linestyle=ls_map[s],
+                    marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                    ms=_ms, lw=_lw, label=_lbl(s))
+        ax_r = None
         if s1:
             ax_r = ax.twinx()
             for s in s1:
-                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
-            _annotate_species_lines(ax_r, fg,
-                [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s1], fr1)
+                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s], linestyle=ls_map[s],
+                          marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                          ms=_ms, lw=_lw, label=_lbl(s))
             ax_r.tick_params(axis='y', labelsize=6)
+        _h, _l = ax.get_legend_handles_labels()
+        if ax_r is not None:
+            _h_r, _l_r = ax_r.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        if len(_l) > 1:
+            ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs)
         fsk = float(rl['fsb'][k]) if np.isfinite(rl['fsb'][k]) else None
         ttl = f't = {t[k]:.4g} s'
         if fsk is not None and 0.0 < fsk < 1.0:
@@ -5121,7 +5780,7 @@ def plot_raylimit_limit_grid(ode_result, save_stem=None):
             ttl += f'\nd: {ray_eq}'
         ax.set_title(ttl, fontsize=9)
         ax.set_xlabel('f', fontsize=8)
-        ax.grid(True, alpha=0.3)
+        ax.set_ylabel('B(f)  (mol/m³)', fontsize=8)
     for i in range(len(idxs), nrows * ncols):
         axes[i // ncols][i % ncols].set_visible(False)
 
@@ -5132,6 +5791,459 @@ def plot_raylimit_limit_grid(ode_result, save_stem=None):
     if save_stem is not None:
         _save_fig(fig, save_stem,
                   f'{_pathlib.Path(save_stem).name}_raylimit_limit_grid.png')
+    else:
+        plt.show()
+
+
+def _raylimit_field_grids(ode_result, f_grid=None):
+    """Compute ray_limit's B(f, t) and C(f, t) on a fixed f grid for every
+    active species over the run's full time history -- the shared data
+    behind the C(f)/B(f) heatmap plots.  Returns (t, f_grid, B_grids,
+    C_grids) where B_grids/C_grids are {species: array shape (n_t, len(f_grid))},
+    or None if this run has no ray_limit data."""
+    rl = ode_result.get('raylimit')
+    if rl is None or rl.get('limit_bps') is None:
+        return None
+    if f_grid is None:
+        f_grid = np.linspace(0.0, 1.0, 200)
+    species_list = ode_result['species']
+    active_indices = list(ode_result['active_indices'])
+    Y1, Y2 = np.asarray(rl['Y1']), np.asarray(rl['Y2'])
+    prof = rl.get('prof', {})
+    t = np.asarray(ode_result['t'])
+    n_t = len(t)
+
+    B_grids, C_grids = {}, {}
+    for sp, sp_prof in prof.items():
+        sg = species_list.index(sp)
+        if sg not in active_indices:
+            continue
+        ai = active_indices.index(sg)
+        Mi = Y1[sg] * f_grid + Y2[sg] * (1.0 - f_grid)
+        B_arr = np.full((n_t, len(f_grid)), np.nan)
+        C_arr = np.full((n_t, len(f_grid)), np.nan)
+        for k in range(n_t):
+            bps = rl['limit_bps'][k]
+            if bps is None:
+                continue
+            bv = np.interp(f_grid, bps, rl['limit_B'][k][:, ai])
+            B_arr[k] = bv
+            lam = sp_prof[k, 3]
+            if np.isfinite(lam):
+                C_arr[k] = lam * Mi + (1.0 - lam) * bv
+        B_grids[sp] = B_arr
+        C_grids[sp] = C_arr
+    return t, f_grid, B_grids, C_grids
+
+
+def _raylimit_beta_weight_grid(ode_result, t, f_grid):
+    """Beta-PDF weight on the same (t, f_grid) as :func:`_raylimit_field_grids`,
+    for weighting a C(f) heatmap by how much each f actually contributes to
+    the true mean concentration.  Uses the *binned* probability mass (CDF
+    difference over each f cell, divided by cell width) rather than the raw
+    pointwise Beta density: at the segregated (t=0) and near-fully-mixed
+    (t=t_end) limits the shape parameters alpha, beta -> 0 or -> large, and
+    the pointwise density diverges at f=0/1, while the binned mass stays
+    finite everywhere (it's what the model actually integrates against)."""
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    m_lambda = ode_result.get('m_lambda', DEFAULT_M_LAMBDA)
+    m_nu = ode_result.get('m_nu', DEFAULT_M_NU)
+    m_Sc = ode_result.get('m_Sc', DEFAULT_M_SC)
+    max_var = mean_f * (1.0 - mean_f)
+
+    edges = np.concatenate(([0.0], 0.5 * (f_grid[1:] + f_grid[:-1]), [1.0]))
+    widths = np.diff(edges)
+
+    W = np.empty((len(t), len(f_grid)))
+    for k, t_k in enumerate(t):
+        var_t = mixing_variance(t_k, mean_f, m_epsilon, m_lambda, m_nu, m_Sc)
+        s_t = max_var / var_t - 1.0
+        alpha_t, beta_t = mean_f * s_t, (1.0 - mean_f) * s_t
+        cdf = _stats.beta.cdf(edges, alpha_t, beta_t)
+        W[k] = (cdf[1:] - cdf[:-1]) / widths
+    return W
+
+
+def plot_raylimit_Cf_heatmap(ode_result, save_stem=None):
+    """Heatmap of ray_limit's interpolated C(f) versus f (x) and time (y),
+    one panel per species -- shows how the C(f) profile relaxes from the
+    no-reaction limit M(f) (t=0) toward the complete-reaction limit B(f) over
+    the course of the run.  Uses the colour-blind-safe, perceptually-uniform
+    'viridis' colormap.
+
+    Each panel's colour scale is fixed to a feed concentration rather than
+    autoscaled to its own data, so scales are comparable across panels: a
+    species fed by stream 1 scales to the highest stream-1 feed
+    concentration; a species fed by stream 2, or fed by neither stream
+    (a pure reaction product), scales to the highest stream-2 feed
+    concentration.
+
+    Red solid contours trace the 0.001/0.01/0.1/0.5/0.9-of-max levels of the
+    local mixture-fraction density Beta(f;t) at each time (normalised per
+    time row, since the density's absolute scale grows enormously as mixing
+    narrows it) -- showing where the Beta-PDF mass actually sits, and how its
+    core and wider spread both narrow in toward mean_f, without replacing the
+    plotted quantity itself.  The lowest two levels (0.001, 0.01) are needed
+    to see any activity at early times: in the segregated limit the peak is
+    many orders of magnitude above the rest of the domain, so the 0.1/0.5/0.9
+    levels alone stay collapsed against f=0/1 until mixing is well underway.
+    A red dotted line (same colour, so it reads as part of the same overlay
+    family against every part of the viridis colormap) traces fs(t), the
+    complete-reaction limit's kink location.
+
+    The C(f) colour scale itself is log (floored at 1e-3 of each panel's
+    vmax, since C(f) can be exactly 0 for an unformed product), rather than
+    linear -- this reveals structure in the near-zero region (e.g. a product
+    species' early, still-tiny values) that a linear scale flattens out."""
+    import pathlib as _pathlib
+    import matplotlib.colors as mcolors
+
+    grids = _raylimit_field_grids(ode_result)
+    if grids is None:
+        return
+    t, f_grid, _B_grids, C_grids = grids
+    active = list(C_grids.keys())
+    if not active:
+        return
+    rl = ode_result['raylimit']
+    species_list = ode_result['species']
+    Y1, Y2 = np.asarray(rl['Y1']), np.asarray(rl['Y2'])
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    mean_f = ode_result['mean_f']
+    W = _raylimit_beta_weight_grid(ode_result, t, f_grid)
+    W_norm = W / np.where(W.max(axis=1, keepdims=True) > 0, W.max(axis=1, keepdims=True), 1.0)
+    fsb = np.asarray(rl['fsb'], dtype=float)
+    fs_mask = np.isfinite(fsb) & (fsb > 0.0) & (fsb < 1.0)
+
+    vmax_of, div_of = _heatmap_vmax_divisors(species_list, active, Y1, Y2)
+
+    ncols = min(3, max(1, int(np.ceil(np.sqrt(len(active))))))
+    nrows = (len(active) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+
+    for idx, sp in enumerate(active):
+        ax = axes[idx // ncols][idx % ncols]
+        div = div_of.get(sp, 1.0)
+        vmax = vmax_of[sp]
+        floor = vmax * 1e-3
+        im = ax.pcolormesh(f_grid, t, np.clip(C_grids[sp] / div, floor, None), shading='auto', cmap='viridis',
+                           norm=mcolors.LogNorm(vmin=floor, vmax=vmax))
+        ax.contour(f_grid, t, W_norm, levels=[0.001, 0.01, 0.1, 0.5, 0.9], colors=[CB_PALETTE[7]], linewidths=1.2)
+        ax.plot(fsb[fs_mask], t[fs_mask], color=CB_PALETTE[7], linestyle=':', linewidth=1.5)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(f'C(f)/{div:g}' if div != 1.0 else 'C(f)', fontsize=7)
+        cbar.ax.tick_params(labelsize=6)
+        ax.set_title(f'{sp}/{div:g}' if div != 1.0 else sp, fontsize=10)
+        ax.set_xlabel('f', fontsize=8)
+        ax.set_ylabel('t  (s)', fontsize=8)
+        ax.set_xlim(0.0, 1.0)
+
+    for idx in range(len(active), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.suptitle('ray_limit interpolated C(f) vs f and time', fontsize=12, y=0.99)
+    fig.text(0.5, 0.945, f'mean_f={mean_f:.4f},  ε={m_epsilon:.4g};  '
+                        f'red solid: 0.001/0.01/0.1/0.5/0.9-max of β(f,t);  red dotted: fs(t)',
+             ha='center', va='top', fontsize=9)
+    fig.tight_layout(rect=[0, 0, 1, 0.91])
+
+    if save_stem is not None:
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_raylimit_Cf_heatmap.png')
+    else:
+        plt.show()
+
+
+def plot_raylimit_Bf_heatmap(ode_result, save_stem=None):
+    """Identical to :func:`plot_raylimit_Cf_heatmap`, but plots the staged
+    complete-reaction limit B(f) instead of the interpolated C(f) -- an
+    experimental side-by-side alternative; see that function for the full
+    description of the colour scale and overlays."""
+    import pathlib as _pathlib
+    import matplotlib.colors as mcolors
+
+    grids = _raylimit_field_grids(ode_result)
+    if grids is None:
+        return
+    t, f_grid, B_grids, _C_grids = grids
+    active = list(B_grids.keys())
+    if not active:
+        return
+    rl = ode_result['raylimit']
+    species_list = ode_result['species']
+    Y1, Y2 = np.asarray(rl['Y1']), np.asarray(rl['Y2'])
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    mean_f = ode_result['mean_f']
+    W = _raylimit_beta_weight_grid(ode_result, t, f_grid)
+    W_norm = W / np.where(W.max(axis=1, keepdims=True) > 0, W.max(axis=1, keepdims=True), 1.0)
+    fsb = np.asarray(rl['fsb'], dtype=float)
+    fs_mask = np.isfinite(fsb) & (fsb > 0.0) & (fsb < 1.0)
+
+    vmax_of, div_of = _heatmap_vmax_divisors(species_list, active, Y1, Y2)
+
+    ncols = min(3, max(1, int(np.ceil(np.sqrt(len(active))))))
+    nrows = (len(active) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+
+    for idx, sp in enumerate(active):
+        ax = axes[idx // ncols][idx % ncols]
+        div = div_of.get(sp, 1.0)
+        vmax = vmax_of[sp]
+        floor = vmax * 1e-3
+        im = ax.pcolormesh(f_grid, t, np.clip(B_grids[sp] / div, floor, None), shading='auto', cmap='viridis',
+                           norm=mcolors.LogNorm(vmin=floor, vmax=vmax))
+        ax.contour(f_grid, t, W_norm, levels=[0.001, 0.01, 0.1, 0.5, 0.9], colors=[CB_PALETTE[7]], linewidths=1.2)
+        ax.plot(fsb[fs_mask], t[fs_mask], color=CB_PALETTE[7], linestyle=':', linewidth=1.5)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(f'B(f)/{div:g}' if div != 1.0 else 'B(f)', fontsize=7)
+        cbar.ax.tick_params(labelsize=6)
+        ax.set_title(f'{sp}/{div:g}' if div != 1.0 else sp, fontsize=10)
+        ax.set_xlabel('f', fontsize=8)
+        ax.set_ylabel('t  (s)', fontsize=8)
+        ax.set_xlim(0.0, 1.0)
+
+    for idx in range(len(active), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    fig.suptitle('ray_limit staged limit B(f) vs f and time', fontsize=12, y=0.99)
+    fig.text(0.5, 0.945, f'mean_f={mean_f:.4f},  ε={m_epsilon:.4g};  '
+                        f'red solid: 0.001/0.01/0.1/0.5/0.9-max of β(f,t);  red dotted: fs(t)',
+             ha='center', va='top', fontsize=9)
+    fig.tight_layout(rect=[0, 0, 1, 0.91])
+
+    if save_stem is not None:
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_raylimit_Bf_heatmap.png')
+    else:
+        plt.show()
+
+
+def plot_raylimit_Cf_heatmap_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
+    """Animate the :func:`plot_raylimit_Cf_heatmap` grid across an ε sweep --
+    one frame per epsilon (sorted increasing), so the qualitative change in
+    how C(f) relaxes over time can be compared across mixing rates.  Each
+    panel's colour scale is fixed exactly as in :func:`plot_raylimit_Cf_heatmap`
+    (stream-1 feed max for stream-1 species, stream-2 feed max otherwise), so
+    colours stay comparable frame to frame; each run's own time axis is used,
+    since the conversion-event termination gives each ε a different
+    integration time.  As in :func:`plot_raylimit_Cf_heatmap`, red solid
+    contours trace the (per-time-row-normalised) 0.001/0.01/0.1/0.5/0.9-of-max
+    levels of the local mixture-fraction density Beta(f;t), and a red dotted
+    line traces fs(t).  `ode_results` is the full per-ε ray_limit results
+    list, as in :func:`plot_raylimit_epsilon_sweep_movie`."""
+    import pathlib as _pathlib
+    import matplotlib.animation as animation
+    import matplotlib.colors as mcolors
+    import matplotlib.ticker as mticker
+
+    runs = [r for r in ode_results if r.get('weight_method') == 'ray_limit'
+            and r.get('raylimit', {}).get('limit_bps') is not None]
+    if len(runs) < 2:
+        return
+    runs = sorted(runs, key=lambda r: r['m_epsilon'])
+
+    species_list = runs[0]['species']
+    mean_f = runs[0]['mean_f']
+    rl0 = runs[0]['raylimit']
+    Y1, Y2 = np.asarray(rl0['Y1']), np.asarray(rl0['Y2'])
+    active = [sp for sp in species_list if sp in rl0.get('prof', {})]
+    if not active:
+        return
+    vmax_of, div_of = _heatmap_vmax_divisors(species_list, active, Y1, Y2)
+    floor_of = {sp: vmax_of[sp] * 1e-3 for sp in active}
+    _lbl = lambda sp: f'{sp}/{div_of[sp]:g}' if sp in div_of else sp
+
+    grids_by_run = [_raylimit_field_grids(res) for res in runs]
+    Wnorm_by_run = []
+    for res, (t_i, f_grid_i, _, _) in zip(runs, grids_by_run):
+        W = _raylimit_beta_weight_grid(res, t_i, f_grid_i)
+        Wmax = W.max(axis=1, keepdims=True)
+        Wnorm_by_run.append(W / np.where(Wmax > 0, Wmax, 1.0))
+    fsb_by_run = [np.asarray(res['raylimit']['fsb'], dtype=float) for res in runs]
+    fs_mask_by_run = [np.isfinite(fsb) & (fsb > 0.0) & (fsb < 1.0) for fsb in fsb_by_run]
+
+    def _style_time_axis(ax):
+        # Fixed-width y-tick labels (a handful of '%.2e'-formatted ticks) so
+        # the space matplotlib reserves for them never changes frame to
+        # frame -- t_end spans orders of magnitude across the sweep, and
+        # without this the axes visibly shift/judder between frames.
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=4))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2e'))
+
+    ncols = min(3, max(1, int(np.ceil(np.sqrt(len(active))))))
+    nrows = (len(active) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+    ax_of = {}
+    t0, f_grid, _, C0 = grids_by_run[0]
+    for idx, sp in enumerate(active):
+        ax_of[sp] = axes[idx // ncols][idx % ncols]
+        ax = ax_of[sp]
+        im = ax.pcolormesh(f_grid, t0, np.clip(C0.get(sp, np.zeros((len(t0), len(f_grid)))) / div_of.get(sp, 1.0), floor_of[sp], None),
+                           shading='auto', cmap='viridis',
+                           norm=mcolors.LogNorm(vmin=floor_of[sp], vmax=vmax_of[sp]))
+        ax.contour(f_grid, t0, Wnorm_by_run[0], levels=[0.001, 0.01, 0.1, 0.5, 0.9], colors=[CB_PALETTE[7]], linewidths=1.2)
+        ax.plot(fsb_by_run[0][fs_mask_by_run[0]], t0[fs_mask_by_run[0]], color=CB_PALETTE[7],
+               linestyle=':', linewidth=1.5)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(f'C(f)/{div_of[sp]:g}' if sp in div_of else 'C(f)', fontsize=7)
+        cbar.ax.tick_params(labelsize=6)
+        # Set titles/labels here too (not just in _draw) so the one-time
+        # tight_layout() call below reserves room for them from the start.
+        ax.set_title(_lbl(sp), fontsize=10)
+        ax.set_xlabel('f', fontsize=8)
+        ax.set_ylabel('t  (s)', fontsize=8)
+        ax.set_xlim(0.0, 1.0)
+        _style_time_axis(ax)
+    for idx in range(len(active), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    _caption = fig.text(0.5, 0.945, '', ha='center', va='top', fontsize=9)
+
+    def _draw(i):
+        res = runs[i]
+        t_i, f_grid_i, _, C_grids = grids_by_run[i]
+        for sp in active:
+            ax = ax_of[sp]
+            ax.clear()
+            ax.pcolormesh(f_grid_i, t_i, np.clip(C_grids.get(sp, np.zeros((len(t_i), len(f_grid_i)))) / div_of.get(sp, 1.0), floor_of[sp], None),
+                         shading='auto', cmap='viridis',
+                         norm=mcolors.LogNorm(vmin=floor_of[sp], vmax=vmax_of[sp]))
+            ax.contour(f_grid_i, t_i, Wnorm_by_run[i], levels=[0.001, 0.01, 0.1, 0.5, 0.9], colors=[CB_PALETTE[7]], linewidths=1.2)
+            ax.plot(fsb_by_run[i][fs_mask_by_run[i]], t_i[fs_mask_by_run[i]], color=CB_PALETTE[7],
+                   linestyle=':', linewidth=1.5)
+            ax.set_title(_lbl(sp), fontsize=10)
+            ax.set_xlabel('f', fontsize=8)
+            ax.set_ylabel('t  (s)', fontsize=8)
+            ax.set_xlim(0.0, 1.0)
+            _style_time_axis(ax)
+        fig.suptitle('ray_limit C(f) vs f and time across the ε sweep', fontsize=12, y=0.99)
+        _caption.set_text(f"mean_f={mean_f:.4f},  ε = {res['m_epsilon']:.4g},  "
+                          f"t_end = {res['t'][-1]:.4g} s;  "
+                          f"red solid: 0.001/0.01/0.1/0.5/0.9-max of β(f,t);  red dotted: fs(t)")
+        # NOTE: layout is fixed once, below, right after setup -- not
+        # recomputed here. _style_time_axis gives every frame the same
+        # fixed-width y-tick label format, so the space they need never
+        # changes; a per-frame tight_layout() call is exactly what caused
+        # the axes to visibly shift/judder between frames.
+        return list(ax_of.values())
+
+    fig.tight_layout(rect=[0, 0, 1, 0.91])
+    anim = animation.FuncAnimation(fig, _draw, frames=len(runs), interval=1000.0 / fps)
+
+    if save_stem is not None:
+        plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'{_pathlib.Path(save_stem).name}_raylimit_Cf_heatmap_epsilon_sweep_movie.mp4'
+        anim.save(out_path, writer='ffmpeg', fps=fps)
+        plt.close(fig)
+        print(f"Saved to {out_path}")
+    else:
+        plt.show()
+
+
+def plot_raylimit_Bf_heatmap_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
+    """Identical to :func:`plot_raylimit_Cf_heatmap_epsilon_sweep_movie`, but
+    animates the staged complete-reaction limit B(f) instead of the
+    interpolated C(f) -- an experimental side-by-side alternative; see that
+    function for the full description of the colour scale and overlays."""
+    import pathlib as _pathlib
+    import matplotlib.animation as animation
+    import matplotlib.colors as mcolors
+    import matplotlib.ticker as mticker
+
+    runs = [r for r in ode_results if r.get('weight_method') == 'ray_limit'
+            and r.get('raylimit', {}).get('limit_bps') is not None]
+    if len(runs) < 2:
+        return
+    runs = sorted(runs, key=lambda r: r['m_epsilon'])
+
+    species_list = runs[0]['species']
+    mean_f = runs[0]['mean_f']
+    rl0 = runs[0]['raylimit']
+    Y1, Y2 = np.asarray(rl0['Y1']), np.asarray(rl0['Y2'])
+    active = [sp for sp in species_list if sp in rl0.get('prof', {})]
+    if not active:
+        return
+    vmax_of, div_of = _heatmap_vmax_divisors(species_list, active, Y1, Y2)
+    floor_of = {sp: vmax_of[sp] * 1e-3 for sp in active}
+    _lbl = lambda sp: f'{sp}/{div_of[sp]:g}' if sp in div_of else sp
+
+    grids_by_run = [_raylimit_field_grids(res) for res in runs]
+    Wnorm_by_run = []
+    for res, (t_i, f_grid_i, _, _) in zip(runs, grids_by_run):
+        W = _raylimit_beta_weight_grid(res, t_i, f_grid_i)
+        Wmax = W.max(axis=1, keepdims=True)
+        Wnorm_by_run.append(W / np.where(Wmax > 0, Wmax, 1.0))
+    fsb_by_run = [np.asarray(res['raylimit']['fsb'], dtype=float) for res in runs]
+    fs_mask_by_run = [np.isfinite(fsb) & (fsb > 0.0) & (fsb < 1.0) for fsb in fsb_by_run]
+
+    def _style_time_axis(ax):
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=4))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2e'))
+
+    ncols = min(3, max(1, int(np.ceil(np.sqrt(len(active))))))
+    nrows = (len(active) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+    ax_of = {}
+    t0, f_grid, B0, _ = grids_by_run[0]
+    for idx, sp in enumerate(active):
+        ax_of[sp] = axes[idx // ncols][idx % ncols]
+        ax = ax_of[sp]
+        im = ax.pcolormesh(f_grid, t0, np.clip(B0.get(sp, np.zeros((len(t0), len(f_grid)))) / div_of.get(sp, 1.0), floor_of[sp], None),
+                           shading='auto', cmap='viridis',
+                           norm=mcolors.LogNorm(vmin=floor_of[sp], vmax=vmax_of[sp]))
+        ax.contour(f_grid, t0, Wnorm_by_run[0], levels=[0.001, 0.01, 0.1, 0.5, 0.9], colors=[CB_PALETTE[7]], linewidths=1.2)
+        ax.plot(fsb_by_run[0][fs_mask_by_run[0]], t0[fs_mask_by_run[0]], color=CB_PALETTE[7],
+               linestyle=':', linewidth=1.5)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(f'B(f)/{div_of[sp]:g}' if sp in div_of else 'B(f)', fontsize=7)
+        cbar.ax.tick_params(labelsize=6)
+        # Set titles/labels here too (not just in _draw) so the one-time
+        # tight_layout() call below reserves room for them from the start.
+        ax.set_title(_lbl(sp), fontsize=10)
+        ax.set_xlabel('f', fontsize=8)
+        ax.set_ylabel('t  (s)', fontsize=8)
+        ax.set_xlim(0.0, 1.0)
+        _style_time_axis(ax)
+    for idx in range(len(active), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    _caption = fig.text(0.5, 0.945, '', ha='center', va='top', fontsize=9)
+
+    def _draw(i):
+        res = runs[i]
+        t_i, f_grid_i, B_grids, _ = grids_by_run[i]
+        for sp in active:
+            ax = ax_of[sp]
+            ax.clear()
+            ax.pcolormesh(f_grid_i, t_i, np.clip(B_grids.get(sp, np.zeros((len(t_i), len(f_grid_i)))) / div_of.get(sp, 1.0), floor_of[sp], None),
+                         shading='auto', cmap='viridis',
+                         norm=mcolors.LogNorm(vmin=floor_of[sp], vmax=vmax_of[sp]))
+            ax.contour(f_grid_i, t_i, Wnorm_by_run[i], levels=[0.001, 0.01, 0.1, 0.5, 0.9], colors=[CB_PALETTE[7]], linewidths=1.2)
+            ax.plot(fsb_by_run[i][fs_mask_by_run[i]], t_i[fs_mask_by_run[i]], color=CB_PALETTE[7],
+                   linestyle=':', linewidth=1.5)
+            ax.set_title(_lbl(sp), fontsize=10)
+            ax.set_xlabel('f', fontsize=8)
+            ax.set_ylabel('t  (s)', fontsize=8)
+            ax.set_xlim(0.0, 1.0)
+            _style_time_axis(ax)
+        fig.suptitle('ray_limit B(f) vs f and time across the ε sweep', fontsize=12, y=0.99)
+        _caption.set_text(f"mean_f={mean_f:.4f},  ε = {res['m_epsilon']:.4g},  "
+                          f"t_end = {res['t'][-1]:.4g} s;  "
+                          f"red solid: 0.001/0.01/0.1/0.5/0.9-max of β(f,t);  red dotted: fs(t)")
+        return list(ax_of.values())
+
+    fig.tight_layout(rect=[0, 0, 1, 0.91])
+    anim = animation.FuncAnimation(fig, _draw, frames=len(runs), interval=1000.0 / fps)
+
+    if save_stem is not None:
+        plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'{_pathlib.Path(save_stem).name}_raylimit_Bf_heatmap_epsilon_sweep_movie.mp4'
+        anim.save(out_path, writer='ffmpeg', fps=fps)
+        plt.close(fig)
+        print(f"Saved to {out_path}")
     else:
         plt.show()
 
@@ -5160,8 +6272,9 @@ def plot_raylimit_limit_movie(ode_result, save_stem=None, fps=15):
     n_t = len(t)
 
     fg = np.linspace(0.0, 1.0, 400)
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
     stream_labels = identify_stream_feeds(Y1, Y2)
     s1 = [s for s in active_indices if stream_labels[s] in (1, 12)]
     s2 = [s for s in active_indices if stream_labels[s] not in (1, 12)]
@@ -5173,14 +6286,10 @@ def plot_raylimit_limit_movie(ode_result, save_stem=None, fps=15):
         return np.interp(fg, bps, rl['limit_B'][k][:, active_indices.index(s)])
 
     gmax = {s: max(float(np.max(np.abs(_Bcurve(k, s)))) for k in range(n_t)) for s in active_indices}
-    scale_div20 = set()
-    for s in active_indices:
-        others = max((gmax[o] for o in active_indices if o != s), default=0.0)
-        if others > 1e-12 and gmax[s] > 20.0 * others:
-            scale_div20.add(s)
-    _lbl = lambda s: species_list[s] + '/20' if s in scale_div20 else species_list[s]
-    _yv = lambda s, arr: arr / 20.0 if s in scale_div20 else arr
-    _sgmax = lambda s: gmax[s] / 20.0 if s in scale_div20 else gmax[s]
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: s in s1 for s in active_indices})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    _yv = lambda s, arr: arr / div_of[s] if s in div_of else arr
+    _sgmax = lambda s: gmax[s] / div_of[s] if s in div_of else gmax[s]
     # Fixed axis limits (global max across all frames) so the movie doesn't
     # jitter from per-frame autoscaling.
     y2max = max((_sgmax(s) for s in s2), default=1.0) * 1.1
@@ -5188,24 +6297,29 @@ def plot_raylimit_limit_movie(ode_result, save_stem=None, fps=15):
 
     fig, ax = plt.subplots(figsize=(8, 5.5))
     ax_r = ax.twinx() if s1 else None
-    fr2 = np.linspace(0.15, 0.85, max(len(s2), 1))
-    fr1 = np.linspace(0.15, 0.85, max(len(s1), 1))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(8, 5.5)
 
     def _draw(k):
         ax.clear()
         if ax_r is not None:
             ax_r.clear()
         for s in s2:
-            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
-        _annotate_species_lines(ax, fg,
-            [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s2], fr2)
+            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s], linestyle=ls_map[s],
+                    marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                    ms=_ms, lw=_lw, label=_lbl(s))
         if ax_r is not None:
             for s in s1:
-                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
-            _annotate_species_lines(ax_r, fg,
-                [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s1], fr1)
+                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s], linestyle=ls_map[s],
+                          marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                          ms=_ms, lw=_lw, label=_lbl(s))
             ax_r.tick_params(axis='y', labelsize=6)
             ax_r.set_ylim(-0.02 * y1max, y1max)
+        _h, _l = ax.get_legend_handles_labels()
+        if ax_r is not None:
+            _h_r, _l_r = ax_r.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        if len(_l) > 1:
+            ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs)
         fsk = float(rl['fsb'][k]) if np.isfinite(rl['fsb'][k]) else None
         ttl = f't = {t[k]:.4g} s'
         if fsk is not None and 0.0 < fsk < 1.0:
@@ -5217,9 +6331,9 @@ def plot_raylimit_limit_movie(ode_result, save_stem=None, fps=15):
             ttl += f'\nd: {ray_eq}'
         ax.set_title(ttl, fontsize=10)
         ax.set_xlabel('f', fontsize=9)
+        ax.set_ylabel('B(f)  (mol/m³)', fontsize=9)
         ax.set_xlim(0.0, 1.0)
         ax.set_ylim(-0.02 * y2max, y2max)
-        ax.grid(True, alpha=0.3)
 
     fig.suptitle(f'ray_limit complete-reaction limit B(f) vs time  '
                 f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g})', fontsize=11)
@@ -5259,8 +6373,9 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
         return
 
     fg = np.linspace(0.0, 1.0, 400)
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
     Y1, Y2 = np.asarray(runs[0]['raylimit']['Y1']), np.asarray(runs[0]['raylimit']['Y2'])
     stream_labels = identify_stream_feeds(Y1, Y2)
     s1 = [s for s in active_indices if stream_labels[s] in (1, 12)]
@@ -5275,21 +6390,16 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
         return np.interp(fg, bps, rl['limit_B'][-1][:, ai])
 
     gmax = {s: max(float(np.max(np.abs(_final_Bcurve(r, s)))) for r in runs) for s in active_indices}
-    scale_div20 = set()
-    for s in active_indices:
-        others = max((gmax[o] for o in active_indices if o != s), default=0.0)
-        if others > 1e-12 and gmax[s] > 20.0 * others:
-            scale_div20.add(s)
-    _lbl = lambda s: species_list[s] + '/20' if s in scale_div20 else species_list[s]
-    _yv = lambda s, arr: arr / 20.0 if s in scale_div20 else arr
-    _sgmax = lambda s: gmax[s] / 20.0 if s in scale_div20 else gmax[s]
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: s in s1 for s in active_indices})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    _yv = lambda s, arr: arr / div_of[s] if s in div_of else arr
+    _sgmax = lambda s: gmax[s] / div_of[s] if s in div_of else gmax[s]
     y2max = max((_sgmax(s) for s in s2), default=1.0) * 1.1
     y1max = max((_sgmax(s) for s in s1), default=1.0) * 1.1
 
     fig, ax = plt.subplots(figsize=(8, 5.5))
     ax_r = ax.twinx() if s1 else None
-    fr2 = np.linspace(0.15, 0.85, max(len(s2), 1))
-    fr1 = np.linspace(0.15, 0.85, max(len(s1), 1))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(8, 5.5)
 
     def _draw(i):
         res = runs[i]
@@ -5297,16 +6407,22 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
         if ax_r is not None:
             ax_r.clear()
         for s in s2:
-            ax.plot(fg, _yv(s, _final_Bcurve(res, s)), color=color_map[s])
-        _annotate_species_lines(ax, fg,
-            [(_lbl(s), color_map[s], _yv(s, _final_Bcurve(res, s))) for s in s2], fr2)
+            ax.plot(fg, _yv(s, _final_Bcurve(res, s)), color=color_map[s], linestyle=ls_map[s],
+                    marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                    ms=_ms, lw=_lw, label=_lbl(s))
         if ax_r is not None:
             for s in s1:
-                ax_r.plot(fg, _yv(s, _final_Bcurve(res, s)), color=color_map[s])
-            _annotate_species_lines(ax_r, fg,
-                [(_lbl(s), color_map[s], _yv(s, _final_Bcurve(res, s))) for s in s1], fr1)
+                ax_r.plot(fg, _yv(s, _final_Bcurve(res, s)), color=color_map[s], linestyle=ls_map[s],
+                          marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                          ms=_ms, lw=_lw, label=_lbl(s))
             ax_r.tick_params(axis='y', labelsize=6)
             ax_r.set_ylim(-0.02 * y1max, y1max)
+        _h, _l = ax.get_legend_handles_labels()
+        if ax_r is not None:
+            _h_r, _l_r = ax_r.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        if len(_l) > 1:
+            ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs)
         fsb = res['raylimit']['fsb']
         fsk = float(fsb[-1]) if np.isfinite(fsb[-1]) else None
         ttl = f"ε = {res['m_epsilon']:.4g}  (t_end = {res['t'][-1]:.4g} s)"
@@ -5315,9 +6431,9 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
             ax.axvline(fsk, color='k', linestyle=':', alpha=0.5)
         ax.set_title(ttl, fontsize=10)
         ax.set_xlabel('f', fontsize=9)
+        ax.set_ylabel('B(f)  (mol/m³)', fontsize=9)
         ax.set_xlim(0.0, 1.0)
         ax.set_ylim(-0.02 * y2max, y2max)
-        ax.grid(True, alpha=0.3)
 
     fig.suptitle(f'ray_limit final complete-reaction limit B(f) across the ε sweep  '
                 f'(mean_f={mean_f:.4f})', fontsize=11)
@@ -5334,13 +6450,344 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
         plt.show()
 
 
+def _species_limits_grid_axes(unique_sp_data, include_cf=True):
+    """Shared setup for the two ray_limit "species_limits" movies: the same
+    per-species subplot grid and static per-subset profile lines as
+    :func:`plot_unique_species_profiles`, plus one extra (initially empty)
+    bold line and one dashed vertical line per subplot for the animated
+    ray_limit B(f) and its fs kink.  When ``include_cf`` is True, also adds a
+    colour-blind-safe red line for the interpolated C(f) (only meaningful
+    when C(f) still visibly differs from B(f) frame to frame, e.g. the
+    single-run time-evolution movie -- not the epsilon-sweep movie, whose
+    frames are each run's converged final state, where C(f) and B(f) are
+    indistinguishable by eye).  Returns
+    (fig, axes, active, b_lines, c_lines, fs_lines, static_yrange) where
+    static_yrange[sp] = (ymin, ymax) of that species' static curves alone,
+    and c_lines is {} when include_cf is False."""
+    meta = unique_sp_data['meta']
+    species_data = unique_sp_data['species']
+    active = [sp for sp in meta['species'] if sp in species_data]
+    if not active:
+        return None
+
+    n_active = len(active)
+    ncols = min(3, max(1, int(np.ceil(np.sqrt(n_active)))))
+    nrows = (n_active + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 3.5 * nrows), squeeze=False)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.5, 3.5)
+    _tab_palette = _build_tab_palette()
+
+    # Same global label->style convention as plot_unique_species_profiles, so
+    # a given subset/group label gets the same colour and legend position in
+    # every subplot here too.
+    _all_labels = []
+    _seen_labels = set()
+    for sp in active:
+        for label in species_data[sp]:
+            if label not in _seen_labels:
+                _seen_labels.add(label)
+                _all_labels.append(label)
+    _label_style = {label: _tab_palette[i % len(_tab_palette)] for i, label in enumerate(_all_labels)}
+
+    b_lines, c_lines, fs_lines, static_yrange = {}, {}, {}, {}
+    _CB_RED = CB_PALETTE[7]   # colour-blind-safe red, for the interpolated C(f)
+    _MAX_LABEL = 20
+    for idx, sp in enumerate(active):
+        ax = axes[idx // ncols][idx % ncols]
+        profiles = species_data[sp]
+
+        y_all = []
+        for label in _all_labels:
+            if label not in profiles:
+                continue
+            profile = profiles[label]
+            bps = profile['breakpoints']
+            segs = profile['segments']
+            if not bps or not segs:
+                continue
+            f_grid = np.array(bps)
+            y_grid = np.array(
+                [segs[0][0] * bps[0] + segs[0][1]] +
+                [segs[j][0] * bps[j + 1] + segs[j][1] for j in range(len(segs))]
+            )
+            color, ls, mk = _label_style[label]
+            display = label if len(label) <= _MAX_LABEL else label[:_MAX_LABEL - 3] + '...'
+            ax.plot(f_grid, y_grid, color=color, linestyle=ls, marker=mk,
+                    markevery=max(1, len(f_grid) // 15), mfc=_face(color), ms=_ms, lw=_lw, label=display)
+            y_all.append(y_grid)
+        static_yrange[sp] = ((min(float(np.min(y)) for y in y_all), max(float(np.max(y)) for y in y_all))
+                             if y_all else (0.0, 1.0))
+
+        (b_lines[sp],) = ax.plot([], [], color='black', lw=_lw * 1.6, ls='-', marker='o',
+                                 markevery=20, ms=_ms, mfc='none', zorder=6, label='ray_limit B(f)')
+        if include_cf:
+            (c_lines[sp],) = ax.plot([], [], color=_CB_RED, lw=_lw * 1.6, ls='-', marker='s',
+                                     markevery=20, ms=_ms, mfc='none', zorder=6.5, label='C(f)')
+        fs_lines[sp] = ax.axvline(np.nan, color='k', linestyle=':', alpha=0.5, zorder=5)
+
+        handles, labels = ax.get_legend_handles_labels()
+        if len(handles) > 1:
+            ax.legend(handles, labels, loc='best', frameon=False, fontsize=_leg_fs)
+        ax.set_title(sp, fontsize=10)
+        ax.set_xlabel('f', fontsize=8)
+        ax.set_xlim(0.0, 1.0)
+
+    for idx in range(n_active, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    return fig, axes, active, b_lines, c_lines, fs_lines, static_yrange
+
+
+def _set_species_limits_ylim(ax, static_range, b_vals_all):
+    """y-limits covering both a species' static subset profiles and every
+    frame of its animated ray_limit B(f) and C(f), so the movie never
+    autoscales or clips."""
+    ymin, ymax = static_range
+    for bv in b_vals_all:
+        ymin = min(ymin, float(np.min(bv)))
+        ymax = max(ymax, float(np.max(bv)))
+    pad = 0.05 * ((ymax - ymin) or 1.0)
+    ax.set_ylim(ymin - pad, ymax + pad)
+
+
+def plot_raylimit_species_limits_movie(unique_sp_data, ode_result, save_stem=None, fps=15):
+    """Animate ray_limit's B(f) for each species over time, overlaid on that
+    species' static per-subset profile grid -- the same layout as
+    :func:`plot_unique_species_profiles` (the "species_limits" plot), so the
+    live ray_limit limit can be compared directly against the LP-derived
+    subset references it interpolates between."""
+    import pathlib as _pathlib
+    import matplotlib.animation as animation
+
+    rl = ode_result.get('raylimit')
+    if rl is None or rl.get('limit_bps') is None:
+        return
+    t = np.asarray(ode_result['t'])
+    n_t = len(t)
+    species_list = ode_result['species']
+    active_indices = list(ode_result['active_indices'])
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    mean_f = ode_result['mean_f']
+    Y1, Y2 = np.asarray(rl['Y1']), np.asarray(rl['Y2'])
+    prof = rl.get('prof', {})
+
+    _setup = _species_limits_grid_axes(unique_sp_data)
+    if _setup is None:
+        return
+    fig, axes, active, b_lines, c_lines, fs_lines, static_yrange = _setup
+
+    fg = np.linspace(0.0, 1.0, 400)
+
+    def _Bcurve(sp_global, k):
+        if sp_global not in active_indices:
+            return None
+        bps = rl['limit_bps'][k]
+        if bps is None:
+            return None
+        ai = active_indices.index(sp_global)
+        return np.interp(fg, bps, rl['limit_B'][k][:, ai])
+
+    def _Ccurve(sp, sp_global, k, bv):
+        if bv is None or sp not in prof:
+            return None
+        lam = prof[sp][k, 3]
+        if not np.isfinite(lam):
+            return None
+        Mi = Y1[sp_global] * fg + Y2[sp_global] * (1.0 - fg)
+        return lam * Mi + (1.0 - lam) * bv
+
+    sp_global_of = {sp: species_list.index(sp) for sp in active}
+    for idx, sp in enumerate(active):
+        ax = axes[idx // len(axes[0])][idx % len(axes[0])]
+        sg = sp_global_of[sp]
+        b_vals_all = [bv for k in range(n_t) if (bv := _Bcurve(sg, k)) is not None]
+        c_vals_all = [cv for k in range(n_t)
+                      if (cv := _Ccurve(sp, sg, k, _Bcurve(sg, k))) is not None]
+        _set_species_limits_ylim(ax, static_yrange[sp], b_vals_all + c_vals_all)
+
+    def _draw(k):
+        fsk = float(rl['fsb'][k]) if np.isfinite(rl['fsb'][k]) else None
+        for sp in active:
+            sg = sp_global_of[sp]
+            bv = _Bcurve(sg, k)
+            b_lines[sp].set_data(fg, bv if bv is not None else [])
+            cv = _Ccurve(sp, sg, k, bv)
+            c_lines[sp].set_data(fg, cv if cv is not None else [])
+            fs_lines[sp].set_xdata([fsk, fsk] if fsk is not None and 0.0 < fsk < 1.0 else [np.nan, np.nan])
+        _fs_str = f',  fs ≈ {fsk:.4f}' if fsk is not None and 0.0 < fsk < 1.0 else ''
+        fig.suptitle(f'ray_limit B(f) vs time  (mean_f={mean_f:.4f},  ε={m_epsilon:.4g},  '
+                    f't = {t[k]:.4g} s{_fs_str})', fontsize=12)
+        return list(b_lines.values()) + list(c_lines.values()) + list(fs_lines.values())
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    anim = animation.FuncAnimation(fig, _draw, frames=n_t, interval=1000.0 / fps)
+
+    if save_stem is not None:
+        plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'{_pathlib.Path(save_stem).name}_raylimit_species_limits_movie.mp4'
+        anim.save(out_path, writer='ffmpeg', fps=fps)
+        plt.close(fig)
+        print(f"Saved to {out_path}")
+    else:
+        plt.show()
+
+
+def plot_raylimit_species_limits_static(unique_sp_data, ode_result, save_stem=None,
+                                        conversion_target=0.5):
+    """Static snapshot of :func:`plot_raylimit_species_limits_movie`, frozen
+    at the output step whose conversion of the stream-1 limiting reactant is
+    closest to `conversion_target`, with C(f) omitted -- leaving just the
+    LP's static per-subset profiles and ray_limit's B(f) for each species."""
+    import pathlib as _pathlib
+
+    rl = ode_result.get('raylimit')
+    if rl is None or rl.get('limit_bps') is None:
+        return
+    species_list = ode_result['species']
+    active_indices = list(ode_result['active_indices'])
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    mean_f = ode_result['mean_f']
+    t = np.asarray(ode_result['t'])
+
+    L_name = ode_result.get('stream1_closure', {}).get('limiting_reactant')
+    if L_name is None:
+        return
+    L_idx = species_list.index(L_name)
+    y0_L = float(ode_result['y'][0, L_idx])
+    if not y0_L:
+        return
+    conv = 1.0 - ode_result['y'][:, L_idx] / y0_L
+    k = int(np.argmin(np.abs(conv - conversion_target)))
+
+    _setup = _species_limits_grid_axes(unique_sp_data, include_cf=False)
+    if _setup is None:
+        return
+    fig, axes, active, b_lines, _c_lines, fs_lines, static_yrange = _setup
+    ncols = len(axes[0])
+
+    fg = np.linspace(0.0, 1.0, 400)
+
+    def _Bcurve(sp_global):
+        if sp_global not in active_indices:
+            return None
+        bps = rl['limit_bps'][k]
+        if bps is None:
+            return None
+        ai = active_indices.index(sp_global)
+        return np.interp(fg, bps, rl['limit_B'][k][:, ai])
+
+    sp_global_of = {sp: species_list.index(sp) for sp in active}
+    fsk = float(rl['fsb'][k]) if np.isfinite(rl['fsb'][k]) else None
+    for idx, sp in enumerate(active):
+        ax = axes[idx // ncols][idx % ncols]
+        sg = sp_global_of[sp]
+        bv = _Bcurve(sg)
+        b_lines[sp].set_data(fg, bv if bv is not None else [])
+        fs_lines[sp].set_xdata([fsk, fsk] if fsk is not None and 0.0 < fsk < 1.0 else [np.nan, np.nan])
+        _set_species_limits_ylim(ax, static_yrange[sp], [bv] if bv is not None else [])
+
+    _fs_str = f',  fs ≈ {fsk:.4f}' if fsk is not None and 0.0 < fsk < 1.0 else ''
+    fig.suptitle(f'ray_limit B(f)  (mean_f={mean_f:.4f},  ε={m_epsilon:.4g},  '
+                f't = {t[k]:.4g} s,  conversion of {L_name} ≈ {100.0 * conv[k]:.1f}%{_fs_str})',
+                fontsize=12, y=0.99)
+    Y1, Y2 = np.asarray(rl['Y1']), np.asarray(rl['Y2'])
+    y0_active = mean_f * Y1[active_indices] + (1.0 - mean_f) * Y2[active_indices]
+    ray_eq = _ray_equation_str(ode_result['y'][k, active_indices] - y0_active,
+                               species_list, active_indices)
+    if ray_eq is not None:
+        fig.text(0.5, 0.945, f'ray: {ray_eq}', ha='center', va='top', fontsize=9)
+    fig.tight_layout(rect=[0, 0, 1, 0.91])
+
+    if save_stem is not None:
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_raylimit_species_limits_static.png')
+    else:
+        plt.show()
+
+
+def plot_raylimit_species_limits_epsilon_sweep_movie(unique_sp_data, ode_results, save_stem=None, fps=2):
+    """Animate ray_limit's final-state B(f) for each species across an ε
+    sweep, overlaid on that species' static per-subset profile grid -- the
+    ε-sweep counterpart of :func:`plot_raylimit_species_limits_movie`.
+    `ode_results` is the full per-ε ray_limit results list, as in
+    :func:`plot_raylimit_epsilon_sweep_movie`."""
+    import pathlib as _pathlib
+    import matplotlib.animation as animation
+
+    runs = [r for r in ode_results if r.get('weight_method') == 'ray_limit'
+            and r.get('raylimit', {}).get('limit_bps') is not None]
+    if len(runs) < 2:
+        return
+    runs = sorted(runs, key=lambda r: r['m_epsilon'])
+    species_list = runs[0]['species']
+    mean_f = runs[0]['mean_f']
+
+    _setup = _species_limits_grid_axes(unique_sp_data, include_cf=False)
+    if _setup is None:
+        return
+    fig, axes, active, b_lines, c_lines, fs_lines, static_yrange = _setup
+
+    fg = np.linspace(0.0, 1.0, 400)
+
+    def _final_Bcurve(res, sp_global):
+        ai_list = list(res['active_indices'])
+        if sp_global not in ai_list:
+            return None
+        rl = res['raylimit']
+        bps = rl['limit_bps'][-1]
+        if bps is None:
+            return None
+        ai = ai_list.index(sp_global)
+        return np.interp(fg, bps, rl['limit_B'][-1][:, ai])
+
+    sp_global_of = {sp: species_list.index(sp) for sp in active}
+    for idx, sp in enumerate(active):
+        ax = axes[idx // len(axes[0])][idx % len(axes[0])]
+        sg = sp_global_of[sp]
+        b_vals_all = [bv for r in runs if (bv := _final_Bcurve(r, sg)) is not None]
+        _set_species_limits_ylim(ax, static_yrange[sp], b_vals_all)
+
+    def _draw(i):
+        res = runs[i]
+        fsb = res['raylimit']['fsb']
+        fsk = float(fsb[-1]) if np.isfinite(fsb[-1]) else None
+        for sp in active:
+            sg = sp_global_of[sp]
+            bv = _final_Bcurve(res, sg)
+            b_lines[sp].set_data(fg, bv if bv is not None else [])
+            fs_lines[sp].set_xdata([fsk, fsk] if fsk is not None and 0.0 < fsk < 1.0 else [np.nan, np.nan])
+        _fs_str = f',  fs ≈ {fsk:.4f}' if fsk is not None and 0.0 < fsk < 1.0 else ''
+        fig.suptitle(f'ray_limit final B(f) across the ε sweep  (mean_f={mean_f:.4f},  '
+                    f"ε = {res['m_epsilon']:.4g}{_fs_str})", fontsize=12)
+        return list(b_lines.values()) + list(fs_lines.values())
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    anim = animation.FuncAnimation(fig, _draw, frames=len(runs), interval=1000.0 / fps)
+
+    if save_stem is not None:
+        plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'{_pathlib.Path(save_stem).name}_raylimit_species_limits_epsilon_sweep_movie.mp4'
+        anim.save(out_path, writer='ffmpeg', fps=fps)
+        plt.close(fig)
+        print(f"Saved to {out_path}")
+    else:
+        plt.show()
+
+
 def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
     """blend_fs only: the blended complete-reaction limit B(f), laid out exactly
     like :func:`plot_raylimit_limit_grid` — all species' coloured profiles overlaid
     on a single axes, one subplot per snapshot time.
 
-    blend_fs's per-species limit is the single-kink profile (v0 at f=0, vfs at the
-    blended fs, v1 at f=1) recorded each step in ``ode_result['blendfs']['prof']``.
+    blend_fs's per-species limit is piecewise-linear over the union of every
+    blended subset's own breakpoints (``ode_result['blendfs']['bp']``), with
+    the blended value at each recorded each step in
+    ``ode_result['blendfs']['prof_full']`` -- not just a single-kink
+    (v0, fs_blend, v1) approximation, so a catalytic reaction's interior kink
+    (e.g. the near-f=0 step where a catalyst confined to one stream first
+    becomes present) is preserved rather than smeared into a long diagonal.
     Uses the SAME species→colour mapping, stream-split (stream-1 species on a twin
     axis) and `/20` scaling as the ray_limit grid, so the two read alike.  The four
     times match the beta snapshots (first near 1/96 of t_end)."""
@@ -5357,6 +6804,8 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
     Y1, Y2 = np.asarray(bf['Y1']), np.asarray(bf['Y2'])
     fsb = np.asarray(bf['fsb'], dtype=float)
     prof = bf['prof']
+    bf_bp = np.asarray(bf['bp'], dtype=float)
+    prof_full = bf['prof_full']
     # Only species that carry a blend profile have a B(f); plot those.
     plotted = [s for s in active_indices if species_list[s] in prof]
     if not plotted:
@@ -5370,51 +6819,53 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
     fg = np.linspace(0.0, 1.0, 400)
 
     # Species→colour: based on global species index so colour is consistent across plots.
-    prop_colors = [c['color'] for c in plt.rcParams['axes.prop_cycle']]
-    color_map = {s: _sp_color(s, species_list, prop_colors) for s in active_indices}
+    color_map = {s: _sp_color(s, species_list) for s in active_indices}
+    ls_map = {s: _sp_linestyle(s, species_list) for s in active_indices}
+    mk_map = {s: _sp_marker(s, species_list) for s in active_indices}
     stream_labels = identify_stream_feeds(Y1, Y2)
     s1 = [s for s in plotted if stream_labels[s] in (1, 12)]   # twin (right) axis
     s2 = [s for s in plotted if stream_labels[s] not in (1, 12)]
 
     def _Bcurve(k, s):
-        v0, vfs, v1, _lam = prof[species_list[s]][k]
-        fsk = fsb[k]
-        if not np.isfinite(v0) or not np.isfinite(fsk) or not (0.0 < fsk < 1.0):
+        v_arr = prof_full[species_list[s]][k]
+        if not np.all(np.isfinite(v_arr)):
             return np.zeros_like(fg)
-        return np.where(fg <= fsk,
-                        v0 + (vfs - v0) * (fg / fsk),
-                        vfs + (v1 - vfs) * (fg - fsk) / (1.0 - fsk))
+        return np.interp(fg, bf_bp, v_arr)
 
     _fs_subs = bf['fs']
 
-    # `/20` scaling for any species whose max dwarfs every other (e.g. solvent).
+    # Scale down any species whose max dwarfs every other species FED BY THE
+    # SAME STREAM (e.g. solvent) to ~1000 -- stream-1 (twin axis) species are
+    # never compared against stream-2 (main axis) species.
     gmax = {s: max(float(np.max(np.abs(_Bcurve(k, s)))) for k in idxs) for s in plotted}
-    scale_div20 = set()
-    for s in plotted:
-        others = max((gmax[o] for o in plotted if o != s), default=0.0)
-        if others > 1e-12 and gmax[s] > 20.0 * others:
-            scale_div20.add(s)
-    _lbl = lambda s: species_list[s] + '/20' if s in scale_div20 else species_list[s]
-    _yv = lambda s, arr: arr / 20.0 if s in scale_div20 else arr
+    div_of = _outlier_scale_divisors_by_stream(gmax, {s: s in s1 for s in plotted})
+    _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
+    _yv = lambda s, arr: arr / div_of[s] if s in div_of else arr
 
     nrows, ncols = 2, 2
     fig, axes = plt.subplots(nrows, ncols, figsize=(7.0 * ncols, 4.5 * nrows),
                              squeeze=False)
-    fr2 = np.linspace(0.15, 0.85, max(len(s2), 1))
-    fr1 = np.linspace(0.15, 0.85, max(len(s1), 1))
+    _ms, _lw, _leg_fs = _scaled_marker_lw(7.0, 4.5)
     for i, k in enumerate(idxs):
         ax = axes[i // ncols][i % ncols]
         for s in s2:
-            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
-        _annotate_species_lines(ax, fg,
-            [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s2], fr2)
+            ax.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s], linestyle=ls_map[s],
+                    marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                    ms=_ms, lw=_lw, label=_lbl(s))
+        ax_r = None
         if s1:
             ax_r = ax.twinx()
             for s in s1:
-                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s])
-            _annotate_species_lines(ax_r, fg,
-                [(_lbl(s), color_map[s], _yv(s, _Bcurve(k, s))) for s in s1], fr1)
+                ax_r.plot(fg, _yv(s, _Bcurve(k, s)), color=color_map[s], linestyle=ls_map[s],
+                          marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
+                          ms=_ms, lw=_lw, label=_lbl(s))
             ax_r.tick_params(axis='y', labelsize=6)
+        _h, _l = ax.get_legend_handles_labels()
+        if ax_r is not None:
+            _h_r, _l_r = ax_r.get_legend_handles_labels()
+            _h, _l = _h + _h_r, _l + _l_r
+        if len(_l) > 1:
+            ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs)
         # Individual subset kinks (thin grey); blended kink fsb (black).
         for fsj in _fs_subs:
             if np.isfinite(fsj) and 0.0 < fsj < 1.0:
@@ -5426,7 +6877,6 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
             ax.axvline(fsk, color='k', linestyle=':', alpha=0.5)
         ax.set_title(ttl, fontsize=9)
         ax.set_xlabel('f', fontsize=8)
-        ax.grid(True, alpha=0.3)
     for i in range(len(idxs), nrows * ncols):
         axes[i // ncols][i % ncols].set_visible(False)
 
@@ -5532,10 +6982,10 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
 
     f_grid = np.linspace(0.0, 1.0, 300)
     f_pdf  = np.linspace(1e-4, 1.0 - 1e-4, 300)
-    _colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
     fig, axes = plt.subplots(n_rxns, n_cols,
                              figsize=(4.0 * n_cols, 3.0 * n_rxns), squeeze=False)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.0, 3.0)
 
     for row, (j, lbl) in enumerate(zip(range(n_rxns), rxn_labels)):
         reactant_pos = np.array(sorted(order_lookup[j]), dtype=int)
@@ -5561,7 +7011,10 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
             for sp_pos in reactant_pos:
                 sp = active_species[sp_pos]
                 sp_global = int(active_indices[sp_pos])
-                color = _sp_color(sp_global, species_list, _colors)
+                color = _sp_color(sp_global, species_list)
+                ls = _sp_linestyle(sp_global, species_list)
+                mk = _sp_marker(sp_global, species_list)
+                _mk_every_cp = max(1, len(f_grid) // 15)
 
                 if is_li:
                     if sp not in sp_profiles or sp not in diag:
@@ -5580,7 +7033,8 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
                         C_f += wn * _eval_profile_array(bps_n, segs_n, f_grid)
                         C_fp += wn * _eval_profile_array(bps_n, segs_n, f_pdf)
                     scale = _display_scale(sp_global)
-                    ax.plot(f_grid, C_f / scale, color=color, lw=1.8, label=sp)
+                    ax.plot(f_grid, C_f / scale, color=color, linestyle=ls, marker=mk,
+                            markevery=_mk_every_cp, mfc=_face(color), ms=_ms, lw=_lw, label=sp)
                     _cf_max = float(np.nanmax(C_f)) / scale
                     cf_max = _cf_max if cf_max is None else max(cf_max, _cf_max)
                     reactant_Cf_pdf[sp_pos] = (C_fp, order_lookup[j][sp_pos])
@@ -5592,21 +7046,37 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
                 Y2_i = float(diag['Y2'][sp_global])
                 v0, vfs, v1, lam = diag['prof'][sp][t_idx]
                 lam = float(lam)
+                # blend_fs only: use the FULL blended B(f) over diag['bp'] (not
+                # just the single-kink v0/vfs/v1) when available -- a
+                # catalyzed reaction's near-boundary kink needs the fuller
+                # resolution.  ray_limit (no 'bp' here) keeps the 2-segment form.
+                _bp_full = diag.get('bp')
+                _v_arr = diag.get('prof_full', {}).get(sp)
+                _v_arr = _v_arr[t_idx] if _v_arr is not None else None
+                _use_full = _bp_full is not None and _v_arr is not None and np.all(np.isfinite(_v_arr))
+
                 # C(f) on f_grid for the main plot
                 M_f = f_grid * Y1_i + (1.0 - f_grid) * Y2_i
-                B_f = np.where(f_grid <= fsb,
-                               v0 + (vfs - v0) * f_grid / fsb,
-                               vfs + (v1 - vfs) * (f_grid - fsb) / (1.0 - fsb))
+                if _use_full:
+                    B_f = np.interp(f_grid, _bp_full, _v_arr)
+                else:
+                    B_f = np.where(f_grid <= fsb,
+                                   v0 + (vfs - v0) * f_grid / fsb,
+                                   vfs + (v1 - vfs) * (f_grid - fsb) / (1.0 - fsb))
                 C_f = B_f + (M_f - B_f) * lam
                 scale = _display_scale(sp_global)
-                ax.plot(f_grid, C_f / scale, color=color, lw=1.8, label=sp)
+                ax.plot(f_grid, C_f / scale, color=color, linestyle=ls, marker=mk,
+                        markevery=_mk_every_cp, mfc=_face(color), ms=6, lw=1.5, label=sp)
                 _cf_max = float(np.nanmax(C_f)) / scale
                 cf_max = _cf_max if cf_max is None else max(cf_max, _cf_max)
                 # C(f) on f_pdf for the rate integrand
                 M_fp = f_pdf * Y1_i + (1.0 - f_pdf) * Y2_i
-                B_fp = np.where(f_pdf <= fsb,
-                                v0 + (vfs - v0) * f_pdf / fsb,
-                                vfs + (v1 - vfs) * (f_pdf - fsb) / (1.0 - fsb))
+                if _use_full:
+                    B_fp = np.interp(f_pdf, _bp_full, _v_arr)
+                else:
+                    B_fp = np.where(f_pdf <= fsb,
+                                    v0 + (vfs - v0) * f_pdf / fsb,
+                                    vfs + (v1 - vfs) * (f_pdf - fsb) / (1.0 - fsb))
                 reactant_Cf_pdf[sp_pos] = (B_fp + (M_fp - B_fp) * lam,
                                            order_lookup[j][sp_pos])
 
@@ -5634,9 +7104,8 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
             ax.set_xlabel('f', fontsize=8)
             ax.set_ylabel('C(f) / feed scale', fontsize=8)
             ax.tick_params(labelsize=7)
-            ax.grid(True, alpha=0.3)
             if reactant_pos.size > 0:
-                ax.legend(fontsize=7, loc='best')
+                ax.legend(fontsize=_leg_fs, loc='best', frameon=False)
 
         row_max = max((m for _, m in row_axpdf), default=0.0)
         if row_max > 0:
@@ -5730,6 +7199,8 @@ if __name__ == '__main__':
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     run_sweep = '--sweep' in sys.argv  # ε sweep is off by default
     make_movie = '--movie' in sys.argv  # ray_limit B(f) movies are off by default
+    _SAVE_PDF = '--pdf' in sys.argv  # also save each figure as a vector PDF
+    heatmaps_only = '--heatmaps-only' in sys.argv  # skip every plot except the Cf/Bf heatmaps (and their movies)
 
     config_path = pathlib.Path(args[0]) if args else pathlib.Path(__file__).parent / 'inputs' / 'input_example.json'
     # Outputs go next to the inputs/ folder, not inside it.
@@ -5744,6 +7215,19 @@ if __name__ == '__main__':
     Stream_1_Feed = np.array(_cfg['stream_feeds']['stream_1'])
     Stream_2_Feed = np.array(_cfg['stream_feeds']['stream_2'])
     rate_constants = _cfg.get('rate_constants', {})
+
+    # If every reaction's rate constant is zero, nothing ever reacts: the
+    # mixing-limited machinery downstream (selectivity rays, kappa1/kappa2
+    # closed forms, f_conserved, etc.) all divide by some measure of reaction
+    # progress, which is identically zero here -- rather than let that
+    # surface as a divide-by-zero/NaN crash somewhere downstream, catch it
+    # up front with a clear message.
+    _rxn_labels_check = [r.split(':')[0].strip() for r in rxns]
+    _k_vals_check = [float((rate_constants or {}).get(lbl, 1000.0)) for lbl in _rxn_labels_check]
+    if _k_vals_check and not any(_k_vals_check):
+        print(f"[error] every reaction's rate constant is zero ({config_path}); "
+              f"nothing can react, so there is no mixing-limited closure to compute. Stopping.")
+        sys.exit(1)
 
     nu_reactants, nu_products = parse_reactions(rxns, species)
 
@@ -5798,14 +7282,15 @@ if __name__ == '__main__':
     print(f"Unique species profiles saved to {unique_sp_path}")
 
     save_stem = base_dir / out_stem
-    plot_concentration_profiles(species, results, segments, save_stem=save_stem)
+    if not heatmaps_only:
+        plot_concentration_profiles(species, results, segments, save_stem=save_stem)
 
-    plot_all_subset_limits(species, rxns, nu_reactants, nu_products,
-                           Stream_1_Feed, Stream_2_Feed, save_stem=save_stem,
-                           keep_subsets=_cfg.get('keep_subsets'),
-                           discard_subsets=_remove_cfg)
+        plot_all_subset_limits(species, rxns, nu_reactants, nu_products,
+                               Stream_1_Feed, Stream_2_Feed, save_stem=save_stem,
+                               keep_subsets=_cfg.get('keep_subsets'),
+                               discard_subsets=_remove_cfg)
 
-    plot_unique_species_profiles(unique_sp_data, save_stem=save_stem)
+        plot_unique_species_profiles(unique_sp_data, save_stem=save_stem)
 
     BETA_MEAN_F = _cfg.get('mean_f', 0.2)
     # Turbulent dissipation rate ε: read from the config if given, else the default.
@@ -5893,32 +7378,41 @@ if __name__ == '__main__':
 
         if not ode_results:
             continue
-        plot_ode_trajectories(ode_results, save_stem=_eps_save)
-        plot_product_fractions_vs_time(ode_results, Stream_1_Feed,
-                                       nu_reactants, nu_products, save_stem=_eps_save,
-                                       Y2=Stream_2_Feed)
-        if abs(_eps - 100.0) < 1e-6 * 100.0:
-            _t_end_ref = float(ode_results[0]['t'][-1])
-            save_ios_csv(BETA_MEAN_F, _eps, _t_end_ref, _eps_save,
-                        m_lambda=M_LAMBDA, m_nu=M_NU, m_Sc=M_SC)
+        if not heatmaps_only:
+            plot_ode_trajectories(ode_results, save_stem=_eps_save)
+            plot_product_fractions_vs_time(ode_results, Stream_1_Feed,
+                                           nu_reactants, nu_products, save_stem=_eps_save,
+                                           Y2=Stream_2_Feed)
+            if abs(_eps - 100.0) < 1e-6 * 100.0:
+                _t_end_ref = float(ode_results[0]['t'][-1])
+                save_ios_csv(BETA_MEAN_F, _eps, _t_end_ref, _eps_save,
+                            m_lambda=M_LAMBDA, m_nu=M_NU, m_Sc=M_SC)
         for _res in ode_results:
-            plot_ode_limit_averages(_res, save_stem=_eps_save)
-            plot_ode_beta_snapshots(unique_sp_data, _res, save_stem=_eps_save)
-            plot_blendfs_diagnostics(_res, save_stem=_eps_save)
-            _bsubs_for_plot = _cfg.get('blend_subsets') if _res.get('weight_method') == 'blend_fs' else None
-            plot_blendfs_limit_grid(_res, save_stem=_eps_save,
-                                    blend_subsets=_bsubs_for_plot)
-            plot_raylimit_diagnostics(_res, save_stem=_eps_save)
-            plot_raylimit_rotation(_res, save_stem=_eps_save)
-            plot_raylimit_selectivity(_res, save_stem=_eps_save)
-            plot_raylimit_early_selectivity(_res, save_stem=_eps_save)
-            plot_raylimit_limit_grid(_res, save_stem=_eps_save)
-            if make_movie:
-                plot_raylimit_limit_movie(_res, save_stem=_eps_save)
-            plot_cprofile_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
+            if not heatmaps_only:
+                plot_ode_limit_averages(_res, save_stem=_eps_save)
+                plot_ode_beta_snapshots(unique_sp_data, _res, save_stem=_eps_save)
+                plot_blendfs_diagnostics(_res, save_stem=_eps_save)
+                _bsubs_for_plot = _cfg.get('blend_subsets') if _res.get('weight_method') == 'blend_fs' else None
+                plot_blendfs_limit_grid(_res, save_stem=_eps_save,
+                                        blend_subsets=_bsubs_for_plot)
+                plot_raylimit_diagnostics(_res, save_stem=_eps_save)
+                plot_raylimit_rotation(_res, save_stem=_eps_save)
+                plot_raylimit_selectivity(_res, save_stem=_eps_save)
+                plot_raylimit_early_selectivity(_res, save_stem=_eps_save)
+                plot_raylimit_limit_grid(_res, save_stem=_eps_save)
+            plot_raylimit_Cf_heatmap(_res, save_stem=_eps_save)
+            plot_raylimit_Bf_heatmap(_res, save_stem=_eps_save)
+            if not heatmaps_only:
+                plot_raylimit_species_limits_static(unique_sp_data, _res, save_stem=_eps_save)
+                if make_movie:
+                    plot_raylimit_limit_movie(_res, save_stem=_eps_save)
+                    plot_raylimit_species_limits_movie(unique_sp_data, _res, save_stem=_eps_save)
+                plot_cprofile_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
         _all_base_results.extend(ode_results)
 
     _method_summary(_all_base_results, label='Base-case runs — all ε values combined')
+    if not heatmaps_only and _multi_eps and len(BETA_EPSILONS) > 2:
+        _save_base_case_epsilon_csv(_all_base_results, RUN_METHODS, save_stem)
 
     # Sweep the turbulent dissipation rate ε and plot the product fractions
     # X_species (opt-in via --sweep).
@@ -5936,4 +7430,9 @@ if __name__ == '__main__':
         if make_movie:
             _rl_sweep_results = _sweep_result.get('ray_limit', {}).get('ode_results')
             if _rl_sweep_results:
-                plot_raylimit_epsilon_sweep_movie(_rl_sweep_results, save_stem=save_stem)
+                if not heatmaps_only:
+                    plot_raylimit_epsilon_sweep_movie(_rl_sweep_results, save_stem=save_stem)
+                    plot_raylimit_species_limits_epsilon_sweep_movie(
+                        unique_sp_data, _rl_sweep_results, save_stem=save_stem)
+                plot_raylimit_Cf_heatmap_epsilon_sweep_movie(_rl_sweep_results, save_stem=save_stem)
+                plot_raylimit_Bf_heatmap_epsilon_sweep_movie(_rl_sweep_results, save_stem=save_stem)

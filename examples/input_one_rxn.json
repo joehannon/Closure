@@ -1,0 +1,19 @@
+{
+  "species": ["A", "B", "P"],
+  "reactions": [
+    "R1: A + B -> P"
+  ],
+
+  "rate_constants": {
+    "R1": 10
+  },
+
+  "stream_feeds": {
+    "stream_1": [15.0, 0.0, 0.0],
+    "stream_2": [0.0, 10.0, 0.0]
+  },
+  "mean_f": 0.33,
+  "weight_methods": [2],
+  "epsilon":[1.0E-6, 1.0, 1.0E+6]
+
+}
