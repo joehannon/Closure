@@ -6,7 +6,7 @@ The code is not ready to be used widely yet. Only take a copy if you really know
 
 The program code is all in species_limits.py.  That reads a JSON describing the chemical reaction system from an inputs subfolder; results appear in several additional subfolders, including plots and lines:
 ```
-python3 species_limits.py inputs/<filename>.JSON
+python3 species_limits.py examples/<filename>.JSON
 ```
 
 You can get the gist of what this does by reading my [blog](https://joehannon.github.io/blog/).  There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.26434/chemrxiv.15006522/v1) and a journal publication will be available soon.
