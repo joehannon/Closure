@@ -2,14 +2,14 @@
 
 Research and development of closure models for fast reactions in turbulent liquids, especially expressions for $B(f)$, the infinitely fast reaction limit that bounds $C(f)$.
 
-The code is not ready to be used widely yet. Only take a copy if you really know what you are doing :) See the [PYPI_README](PYPI_README.md) for additional info. The code will be made code pip installable from PyPi for wider use, planned for Q4 2026.
+The code is not ready to be used widely yet. Only take a copy if you really know what you are doing :) See the [PYPI_README](PYPI_README.md) and [JSON_OPTIONS](JSON_OPTIONS.md) for additional information. The code will be made code pip installable from PyPi for wider use, planned for Q4 2026.
 
-The program code is all in species_limits.py.  That reads a JSON describing the chemical reaction system from an inputs subfolder; results appear in several additional subfolders, including plots and lines:
+The program code is currently all in species_limits.py.  That reads a JSON describing the chemical reaction system from an inputs subfolder; results appear in several additional subfolders, including plots and lines:
 ```
 python3 species_limits.py examples/<filename>.JSON
 ```
 
-If the JSON lives in folder names "inputs", outputs go one level up — a sibling of inputs/. If the JSON is anywhere else, outputs land right next to it.
+If the JSON lives in a folder named "inputs", outputs go one level up — a sibling of inputs/. If the JSON is anywhere else, outputs land right next to it.
 
 You can get more context and detail by reading my [blog](https://joehannon.github.io/blog/).  There's also a preprint available at [ChemRxiv](https://chemrxiv.org/doi/abs/10.26434/chemrxiv.15006522/v1) and a journal publication will be available soon.
 
