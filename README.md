@@ -28,7 +28,7 @@ $C(f)$ moving towards $B(f)$ at $\epsilon$=1E6 W/kg:
 
 https://github.com/user-attachments/assets/dcf397f9-4ed5-4f9b-9312-c2ba2f42d4bd
 
-Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values from 1E-6 to 1E6 W/kg:
+Limits $B(f)$ changing with mixing intensity when we sweep over a range of $\epsilon$ values from 1E-6 to 1E6 W/kg:
 
 https://github.com/user-attachments/assets/91dd986e-f1ff-404e-a259-d857f799b23d
 
