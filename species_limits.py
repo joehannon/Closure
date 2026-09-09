@@ -7126,6 +7126,329 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
         plt.show()
 
 
+def plot_cprofile_reactant_product_per_reaction(unique_sp_data, ode_result, save_stem=None):
+    """C(f) closure profiles for reactant species of each reaction.
+
+    Identical to :func:`plot_cprofile_per_reaction` except the secondary-axis
+    curve is the raw reactant product ∏ C_i(f)^order_i (no β-PDF(f) weighting)
+    -- the local, un-mixing-averaged rate-law density -- rather than the
+    Beta-weighted rate integrand. Supported for blend_fs, ray_limit, and
+    linear_interp; returns silently for other methods.
+    """
+    import pathlib as _pathlib
+
+    weight_method = ode_result.get('weight_method', '')
+    is_li = weight_method == 'linear_interp'
+    if weight_method == 'blend_fs':
+        diag = ode_result.get('blendfs')
+    elif weight_method == 'ray_limit':
+        diag = ode_result.get('raylimit')
+    elif is_li:
+        diag = ode_result.get('li_weights')
+    else:
+        return
+    if diag is None:
+        return
+    sp_profiles = ode_result.get('sp_profiles', {}) if is_li else None
+
+    meta = unique_sp_data['meta']
+    species_list = meta['species']
+    rxns = meta['reactions']
+    rxn_labels = [r.split(':')[0].strip() for r in rxns]
+    n_rxns = len(rxn_labels)
+
+    active_indices = list(ode_result['active_indices'])
+    active_species = [species_list[i] for i in active_indices]
+    t_arr = ode_result['t']
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+
+    # Rate-law order per (species, reaction) — NOT the raw stoichiometric
+    # coefficient; matches the order actually used by the ODE integration
+    # (default 1, unless the reaction is `elementary` or the JSON supplies
+    # explicit `orders`).
+    rxn_reactants = ode_result['rxn_reactants']
+    global_to_active = {int(i): pos for pos, i in enumerate(active_indices)}
+    order_lookup = [
+        {global_to_active[i]: order for i, order in rxn_reactants[j] if i in global_to_active}
+        for j in range(n_rxns)
+    ]
+
+    # Per-species display scale for the C(f) curves (main axis only — the
+    # reactant product keeps the true, unscaled concentrations): a fed
+    # species is scaled by its own (nonzero) feed concentration; an unfed
+    # product has no feed of its own, so it's scaled by the smallest nonzero
+    # stream-2 feed.
+    Y1_arr = np.asarray(ode_result['Y1'], dtype=float)
+    Y2_arr = np.asarray(ode_result['Y2'], dtype=float)
+    _y2_pos = Y2_arr[Y2_arr > 0]
+    stream2_min = float(_y2_pos.min()) if _y2_pos.size else 1.0
+
+    def _display_scale(sp_global):
+        y1_i, y2_i = float(Y1_arr[sp_global]), float(Y2_arr[sp_global])
+        if y1_i > 0:
+            return y1_i
+        if y2_i > 0:
+            return y2_i
+        return stream2_min
+
+    # Snapshot times matching plot_ode_beta_snapshots
+    _T = float(t_arr[-1] - t_arr[0])
+    target_times = np.linspace(t_arr[0], t_arr[-1], 4)
+    target_times[0] = t_arr[0] + _T / 96.0
+    snap_idxs = sorted([int(np.argmin(np.abs(t_arr - tt))) for tt in target_times])
+    snap_labels = [f't={t_arr[i]:.4g} s' for i in snap_idxs]
+    n_cols = len(snap_idxs)
+
+    f_grid = np.linspace(0.0, 1.0, 300)
+    f_pdf  = np.linspace(1e-4, 1.0 - 1e-4, 300)
+
+    fig, axes = plt.subplots(n_rxns, n_cols,
+                             figsize=(4.0 * n_cols, 3.0 * n_rxns), squeeze=False)
+    _ms, _lw, _leg_fs = _scaled_marker_lw(4.0, 3.0)
+
+    for row, (j, lbl) in enumerate(zip(range(n_rxns), rxn_labels)):
+        reactant_pos = np.array(sorted(order_lookup[j]), dtype=int)
+        row_axpdf = []   # (ax_pdf, rig_max) pairs — shared secondary-axis scale across the row
+        for col, (t_idx, t_label) in enumerate(zip(snap_idxs, snap_labels)):
+            ax = axes[row][col]
+            t_snap = float(t_arr[t_idx])
+
+            if not is_li:
+                fsb = float(diag['fsb'][t_idx])
+                if not (np.isfinite(fsb) and 0.0 < fsb < 1.0):
+                    fsb = 0.5
+
+            reactant_Cf_pdf = {}  # sp_pos -> (Cf_on_f_pdf, rate_order)
+            cf_max = None   # overall max C(f) in this subplot, for the log y-axis
+            for sp_pos in reactant_pos:
+                sp = active_species[sp_pos]
+                sp_global = int(active_indices[sp_pos])
+                color = _sp_color(sp_global, species_list)
+                ls = _sp_linestyle(sp_global, species_list)
+                mk = _sp_marker(sp_global, species_list)
+                _mk_every_cp = max(1, len(f_grid) // 15)
+
+                if is_li:
+                    if sp not in sp_profiles or sp not in diag:
+                        continue
+                    w = diag[sp][t_idx]
+                    profiles = sp_profiles[sp]
+                    C_f = np.zeros_like(f_grid)
+                    C_fp = np.zeros_like(f_pdf)
+                    for n, (_lbl_n, prof_n) in enumerate(profiles):
+                        wn = float(w[n]) if n < len(w) else 0.0
+                        if not np.isfinite(wn) or wn == 0.0:
+                            continue
+                        bps_n, segs_n = prof_n['breakpoints'], prof_n['segments']
+                        if not bps_n or not segs_n:
+                            continue
+                        C_f += wn * _eval_profile_array(bps_n, segs_n, f_grid)
+                        C_fp += wn * _eval_profile_array(bps_n, segs_n, f_pdf)
+                    scale = _display_scale(sp_global)
+                    ax.plot(f_grid, C_f / scale, color=color, linestyle=ls, marker=mk,
+                            markevery=_mk_every_cp, mfc=_face(color), ms=_ms, lw=_lw, label=sp)
+                    _cf_max = float(np.nanmax(C_f)) / scale
+                    cf_max = _cf_max if cf_max is None else max(cf_max, _cf_max)
+                    reactant_Cf_pdf[sp_pos] = (C_fp, order_lookup[j][sp_pos])
+                    continue
+
+                if sp not in diag.get('prof', {}):
+                    continue
+                Y1_i = float(diag['Y1'][sp_global])
+                Y2_i = float(diag['Y2'][sp_global])
+                v0, vfs, v1, lam = diag['prof'][sp][t_idx]
+                lam = float(lam)
+                # blend_fs only: use the FULL blended B(f) over diag['bp'] (not
+                # just the single-kink v0/vfs/v1) when available -- a
+                # catalyzed reaction's near-boundary kink needs the fuller
+                # resolution.  ray_limit (no 'bp' here) keeps the 2-segment form.
+                _bp_full = diag.get('bp')
+                _v_arr = diag.get('prof_full', {}).get(sp)
+                _v_arr = _v_arr[t_idx] if _v_arr is not None else None
+                _use_full = _bp_full is not None and _v_arr is not None and np.all(np.isfinite(_v_arr))
+
+                # C(f) on f_grid for the main plot
+                M_f = f_grid * Y1_i + (1.0 - f_grid) * Y2_i
+                if _use_full:
+                    B_f = np.interp(f_grid, _bp_full, _v_arr)
+                else:
+                    B_f = np.where(f_grid <= fsb,
+                                   v0 + (vfs - v0) * f_grid / fsb,
+                                   vfs + (v1 - vfs) * (f_grid - fsb) / (1.0 - fsb))
+                C_f = B_f + (M_f - B_f) * lam
+                scale = _display_scale(sp_global)
+                ax.plot(f_grid, C_f / scale, color=color, linestyle=ls, marker=mk,
+                        markevery=_mk_every_cp, mfc=_face(color), ms=6, lw=1.5, label=sp)
+                _cf_max = float(np.nanmax(C_f)) / scale
+                cf_max = _cf_max if cf_max is None else max(cf_max, _cf_max)
+                # C(f) on f_pdf for the reactant product
+                M_fp = f_pdf * Y1_i + (1.0 - f_pdf) * Y2_i
+                if _use_full:
+                    B_fp = np.interp(f_pdf, _bp_full, _v_arr)
+                else:
+                    B_fp = np.where(f_pdf <= fsb,
+                                    v0 + (vfs - v0) * f_pdf / fsb,
+                                    vfs + (v1 - vfs) * (f_pdf - fsb) / (1.0 - fsb))
+                reactant_Cf_pdf[sp_pos] = (B_fp + (M_fp - B_fp) * lam,
+                                           order_lookup[j][sp_pos])
+
+            # Reactant product: ∏ C_i(f)^order_i (no β-PDF weighting; row-shared axis)
+            ax_pdf = ax.twinx()
+            rig_max = 0.0
+            if reactant_Cf_pdf:
+                rate_ig = np.ones_like(f_pdf)
+                for Cf_p, order in reactant_Cf_pdf.values():
+                    rate_ig *= np.maximum(Cf_p, 0.0) ** order
+                ax_pdf.plot(f_pdf, rate_ig, color='tab:orange', lw=1.2, ls='--', zorder=0)
+                rig_max = float(rate_ig.max())
+            ax_pdf.set_ylabel('∏C', fontsize=7, color='grey')
+            ax_pdf.tick_params(axis='y', labelcolor='grey', labelsize=6)
+            ax_pdf.set_ylim(bottom=0)
+            row_axpdf.append((ax_pdf, rig_max))
+            ax.set_zorder(ax_pdf.get_zorder() + 1)
+            ax.patch.set_visible(False)
+
+            if cf_max is not None and cf_max > 0:
+                ax.set_ylim(0, cf_max * 1.05)
+
+            ax.axvline(mean_f, color='gray', lw=0.8, ls=':', alpha=0.7)
+            ax.set_title(f'{lbl}  {t_label}', fontsize=9)
+            ax.set_xlabel('f', fontsize=8)
+            ax.set_ylabel('C(f) / feed scale', fontsize=8)
+            ax.tick_params(labelsize=7)
+            if reactant_pos.size > 0:
+                ax.legend(fontsize=_leg_fs, loc='best', frameon=False)
+
+        row_max = max((m for _, m in row_axpdf), default=0.0)
+        if row_max > 0:
+            for ax_pdf, _ in row_axpdf:
+                ax_pdf.set_ylim(0, row_max * 1.05)
+
+    fig.suptitle(
+        f'C(f) reactant profiles per reaction — raw reactant product  '
+        f'(ε={m_epsilon:.4g},  mean_f={mean_f:.4f},  {weight_method})',
+        fontsize=10)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+    if save_stem is not None:
+        _wm = ode_result.get('weight_method', 'unknown')
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_{_wm}_cprofile_product.png')
+    else:
+        plt.show()
+
+
+def plot_raylimit_reaction_extents(unique_sp_data, ode_result, save_stem=None):
+    """Per-reaction extent ξ_j(f), all reactions overlaid on one subplot per
+    snapshot time (same 4 snapshot times as plot_cprofile_per_reaction).
+
+    ray_limit's closure profile satisfies C(f) - M(f) = (shared shape(f)) · v_peak
+    for a single vector v_peak (the selectivity ray, scaled) -- a single line in
+    reaction-extent space. Recovering the individual reaction extents ξ_j(f) from
+    that requires N (net stoichiometry, restricted to active species) to have
+    full column rank; when it doesn't, two or more reactions have an
+    indistinguishable net effect on the tracked species and their extents cannot
+    be separated from concentration data alone, so this plot is skipped. When it
+    does, ξ(f) = pinv(N) @ v_peak(f) is exact (not a fit): v_peak(f) is evaluated
+    at the current step's peak point f_peak (ray_limit's fsb) from the same
+    (v0, vfs, v1, λ) already recorded for the cprofile plots, and ξ_j(f) =
+    ξ_j(f_peak) · shape(f) reuses ray_limit's own triangular shape(f) (peak 1 at
+    f_peak, 0 at f=0 and f=1) -- the same shared-ray assumption the cprofile
+    plots already make, not a new approximation.
+    """
+    import pathlib as _pathlib
+
+    if ode_result.get('weight_method') != 'ray_limit':
+        return
+    diag = ode_result.get('raylimit')
+    if diag is None:
+        return
+
+    meta = unique_sp_data['meta']
+    species_list = meta['species']
+    rxns = meta['reactions']
+    rxn_labels = [r.split(':')[0].strip() for r in rxns]
+    n_rxns = len(rxn_labels)
+
+    active_indices = list(ode_result['active_indices'])
+    active_species = [species_list[i] for i in active_indices]
+    n_active = len(active_indices)
+
+    nu_r, nu_p = parse_reactions(rxns, species_list)
+    N_active = (nu_p - nu_r)[active_indices, :]
+    rank = int(np.linalg.matrix_rank(N_active))
+    if rank < n_rxns:
+        print(f"[ray_limit]   [reaction extents] net stoichiometry (restricted to "
+              f"active species) has rank {rank} < {n_rxns} reactions -- some "
+              f"reactions' extents are indistinguishable from concentration data "
+              f"alone; skipping the per-reaction extent plot.")
+        return
+    N_pinv = np.linalg.pinv(N_active)
+
+    t_arr = ode_result['t']
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+
+    _T = float(t_arr[-1] - t_arr[0])
+    target_times = np.linspace(t_arr[0], t_arr[-1], 4)
+    target_times[0] = t_arr[0] + _T / 96.0
+    snap_idxs = sorted([int(np.argmin(np.abs(t_arr - tt))) for tt in target_times])
+    snap_labels = [f't={t_arr[i]:.4g} s' for i in snap_idxs]
+    n_cols = len(snap_idxs)
+
+    f_grid = np.linspace(0.0, 1.0, 300)
+    colors = [plt.get_cmap('tab10')(j % 10) for j in range(n_rxns)]
+
+    fig, axes = plt.subplots(1, n_cols, figsize=(4.0 * n_cols, 3.2), squeeze=False)
+    axes = axes[0]
+
+    for col, (t_idx, t_label) in enumerate(zip(snap_idxs, snap_labels)):
+        ax = axes[col]
+
+        f_peak = float(diag['fsb'][t_idx])
+        if not (np.isfinite(f_peak) and 0.0 < f_peak < 1.0):
+            f_peak = 0.5
+
+        v_peak_C = np.zeros(n_active)
+        for pos, sp in enumerate(active_species):
+            prof_sp = diag.get('prof', {}).get(sp)
+            if prof_sp is None:
+                continue
+            v0, vfs, v1, lam = prof_sp[t_idx]
+            m_peak = float(v0) + (float(v1) - float(v0)) * f_peak
+            v_peak_C[pos] = (float(vfs) - m_peak) * (1.0 - float(lam))
+
+        xi_peak = N_pinv @ v_peak_C   # ξ_j(f_peak), exact (N_active full column rank)
+        shape_f = np.where(f_grid <= f_peak, f_grid / f_peak,
+                           (1.0 - f_grid) / (1.0 - f_peak))
+
+        for j in range(n_rxns):
+            ax.plot(f_grid, xi_peak[j] * shape_f, color=colors[j], lw=1.5,
+                    label=rxn_labels[j])
+
+        ax.axvline(mean_f, color='gray', lw=0.8, ls=':', alpha=0.7)
+        ax.axvline(f_peak, color='gray', lw=0.8, ls='--', alpha=0.4)
+        ax.axhline(0.0, color='black', lw=0.6, alpha=0.4)
+        ax.set_title(t_label, fontsize=9)
+        ax.set_xlabel('f', fontsize=8)
+        ax.set_ylabel('ξ(f)  (mol/m³)', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7, loc='best', frameon=False)
+
+    fig.suptitle(
+        f'ray_limit per-reaction extent ξ(f)  '
+        f'(ε={m_epsilon:.4g},  mean_f={mean_f:.4f})',
+        fontsize=10)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    if save_stem is not None:
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_ray_limit_reaction_extents.png')
+    else:
+        plt.show()
+
+
 def _clamp_total(res):
     """Return the total number of clamp steps across all species for one ODE result."""
     wm = res.get('weight_method', '')
@@ -7408,6 +7731,8 @@ if __name__ == '__main__':
                     plot_raylimit_limit_movie(_res, save_stem=_eps_save)
                     plot_raylimit_species_limits_movie(unique_sp_data, _res, save_stem=_eps_save)
                 plot_cprofile_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
+                plot_cprofile_reactant_product_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
+                plot_raylimit_reaction_extents(unique_sp_data, _res, save_stem=_eps_save)
         _all_base_results.extend(ode_results)
 
     _method_summary(_all_base_results, label='Base-case runs — all ε values combined')
