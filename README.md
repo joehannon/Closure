@@ -1,8 +1,8 @@
 # Closure #
 
-Research and development of closure models for fast reactions in turbulent liquids, especially expressions for $B(f)$, the infinitely fast reaction limit that bounds $C(f)$.
+Research and development of closure models for complex systems of fast reactions in turbulent liquids, especially expressions for $B(f)$, the complete/ infinitely fast reaction limit that bounds $C(f)$.
 
-The code is not ready to be used widely yet. Only take a copy if you really know what you are doing :) See the [PYPI_README](PYPI_README.md) and [JSON_OPTIONS](JSON_OPTIONS.md) for additional information. The code will be made code pip installable from PyPi for wider use, planned for Q4 2026.
+The code illustrates closures and will soon be ready to release for application to user-defined reaction systems. See the [PYPI_README](PYPI_README.md) and [JSON_OPTIONS](JSON_OPTIONS.md) for additional information. The code will be made code pip installable from PyPi, planned for Q4 2026.
 
 The program code is currently all in species_limits.py.  That reads a JSON describing the chemical reaction system from an inputs subfolder; results appear in several additional subfolders, including plots and lines:
 ```
