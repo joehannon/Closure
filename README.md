@@ -20,27 +20,27 @@ The following videos illustrate the dynamic nature of the ray limit method for e
 
 Species view shows the static limits that may be pre-calculated for each of the $2^N$ infinitely fast reaction subsets in an $N$-reaction system.  Ray limit's $B(f)$ is overlaid (black squares) on a subplot for each species.
 
-Limits $B(f)$ changing with time during a simulation, $\epsilon$=1 W/kg:
+Limits $B(f)$ changing with time during a simulation, $\epsilon$=1E-6 W/kg:
 
-https://github.com/user-attachments/assets/b56b4471-ff4a-4420-a6fe-34337f5ea9bd
+https://github.com/user-attachments/assets/4f61df09-af7f-4f99-ad16-25320d037b8b
 
 $C(f)$ moving towards $B(f)$ at $\epsilon$=1E6 W/kg:
 
-https://github.com/user-attachments/assets/dcf397f9-4ed5-4f9b-9312-c2ba2f42d4bd
+https://github.com/user-attachments/assets/29f8f23c-0474-411b-a2f5-859120aa4a00
 
 Limits $B(f)$ changing with mixing intensity when we sweep over a range of $\epsilon$ values from 1E-6 to 1E6 W/kg:
 
-https://github.com/user-attachments/assets/91dd986e-f1ff-404e-a259-d857f799b23d
+https://github.com/user-attachments/assets/b828b8f2-f5d7-4980-aa9e-4a7fde783f85
+
+Heatmap of $B(f)$ versus f and time when we sleep over a range of $\epsilon$ values from 1E-6 to 1E6 W/kg:
+
+https://github.com/user-attachments/assets/fa8ba5f8-dae1-4737-aa5f-59046f50a383
 
 **Videos in format used in the ChemRxiv preprint, "subset view"**
 
 Subset view shows only ray limit's automatically calculated $B(f)$ on a single plot showing all species.
 
-Limits changing with time during a simulation:
-
-[Limits changing with time during a simulation](https://github.com/user-attachments/assets/fad753fd-be26-426c-bf49-5c9d27e62d63)
-
 Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) from low to high:
 
-[Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) from low to high](https://github.com/user-attachments/assets/df506b03-5ce7-4044-b82f-17da84cabd09)
+https://github.com/user-attachments/assets/e5225f6e-fb57-4bce-a863-238e0fb98860
 
