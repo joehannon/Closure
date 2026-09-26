@@ -38,7 +38,7 @@ https://github.com/user-attachments/assets/fa8ba5f8-dae1-4737-aa5f-59046f50a383
 
 **Videos in format used in the ChemRxiv preprint, "subset view"**
 
-Subset view shows only ray limit's automatically calculated $B(f)$ on a single plot showing all species.
+Subset view shows ray limit's automatically calculated $B(f)$ on a single plot showing all species. Here the final pdf of f has been added to the plot.
 
 Limits changing with mixing intensity when we sweep over a range of $\epsilon$ values (W/kg) from low to high:
 
