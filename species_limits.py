@@ -2179,6 +2179,18 @@ def plot_ode_trajectories(ode_results, save_stem=None):
     )
     rxn_labels = ref.get('rxn_labels', [])
 
+    # Bimolecular reactions (exactly 2 distinct reactant species) only -- the
+    # rate/(k*y1*y2)-1 fluctuation-correlation diagnostic below is only
+    # meaningful for a two-species mass-action rate law.
+    _rxn_reactants = ref.get('rxn_reactants', [])
+    corr_rxns = []
+    if has_rates:
+        for j in range(len(rxn_labels)):
+            sp_idx = [i for i, _order in _rxn_reactants[j]] if j < len(_rxn_reactants) else []
+            if len(sp_idx) == 2:
+                corr_rxns.append((j, rxn_labels[j], sp_idx[0], sp_idx[1]))
+    has_corr = bool(corr_rxns)
+
     single_method = (len(ode_results) == 1)
     n_cols = min(3, n_plot)
     n_rows = (n_plot + n_cols - 1) // n_cols
@@ -2220,7 +2232,8 @@ def plot_ode_trajectories(ode_results, save_stem=None):
     ios_panel      = n_sp_panels
     lambda_panel   = ios_panel + 1
     rate_panel0    = lambda_panel + (1 if has_lambda else 0)
-    n_total_panels = n_sp_panels + 1 + (1 if has_lambda else 0) + n_rxns
+    corr_panel     = rate_panel0 + n_rxns
+    n_total_panels = n_sp_panels + 1 + (1 if has_lambda else 0) + n_rxns + (1 if has_corr else 0)
     n_rows         = (n_total_panels + n_cols - 1) // n_cols
 
     fig = plt.figure(figsize=(4 * n_cols, 3 * n_rows))
@@ -2384,6 +2397,42 @@ def plot_ode_trajectories(ode_results, save_stem=None):
             ax_r.tick_params(labelsize=7)
             if len(ode_results) > 1:
                 ax_r.legend(fontsize=_leg_fs, loc='best', frameon=False)
+
+    # ── Concentration-fluctuation correlation, all bimolecular reactions
+    # ── overlaid on one panel (colour = reaction, matching the rate panels
+    # ── above) -- rate/(k*y1*y2) - 1 = <C1 C2>/(<C1><C2>) - 1, i.e. the
+    # ── normalised covariance between the two reactants' local
+    # ── concentration fluctuations under the mixture-fraction pdf. ──────────
+    if has_corr:
+        ax_c = _cell(corr_panel)
+        for j, lbl, i1, i2 in corr_rxns:
+            color = rxn_colors[j % len(rxn_colors)]
+            for res_idx, res in enumerate(ode_results):
+                rates = res.get('rates')
+                k_vals = res.get('k_vals_base')
+                if rates is None or j >= rates.shape[1] or k_vals is None:
+                    continue
+                method = res.get('weight_method', f'run{res_idx}')
+                st = _wm_style(method)
+                every = max(1, len(res['t']) // 15)
+                k = float(k_vals[j])
+                denom = k * res['y'][:, i1] * res['y'][:, i2]
+                corr = np.where(denom > 0.0, rates[:, j] / np.where(denom > 0.0, denom, 1.0) - 1.0, np.nan)
+                marker = _SP_MARKERS[j % len(_SP_MARKERS)]
+                # Open markers here (unlike the filled markers elsewhere in
+                # this figure): several reactions' curves sit almost on top
+                # of one another near -1, and a hollow marker lets the
+                # overlapping outlines stay visible instead of one curve's
+                # filled marker fully occluding another's.
+                ax_c.plot(res['t'], corr, color=color, ls=st['ls'], lw=_lw,
+                          marker=marker, ms=_ms, markevery=every, mfc='none', mew=st['mew'],
+                          label=lbl if len(ode_results) == 1 else f'{lbl} ({method})')
+        ax_c.axhline(0.0, color='gray', lw=0.7, ls=':', alpha=0.6)
+        ax_c.set_xlabel('t (s)', fontsize=8)
+        ax_c.set_ylabel('rate/(k·y₁·y₂) − 1', fontsize=8)
+        ax_c.set_title('Concentration-fluctuation correlation', fontsize=10)
+        ax_c.tick_params(labelsize=7)
+        ax_c.legend(fontsize=_leg_fs, loc='best', frameon=False)
 
     # hide unused cells in last row
     for p in range(n_total_panels, n_rows * n_cols):
@@ -4143,6 +4192,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     L_event = _stream1_limiting_index(Y1, nu_reactants, Y2, nu_products)
     use_event = t_end is None and L_event is not None
     tau_s_run = mixing_timescale(m_epsilon, m_lambda)
+    tau_E_run = 1.0 / (0.05776 * (m_epsilon / m_nu) ** 0.5)
+    print(f"[{weight_method}]   τ_E = {tau_E_run:.4g} s;  τ_s = {tau_s_run:.4g} s")
     # Stream-1 limiting reactant, active-indexed and its fed (t=0) amount --
     # computed unconditionally (not just when use_event) so _selectivity_ray's
     # fallback-switch report below always has them available.
@@ -4600,6 +4651,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         'f_conserved': f_conserved,
         'rates': rates_out,
         'rxn_labels': rxn_labels,
+        'k_vals_base': k_vals_base,
         'species': species_list,
         'mean_f': mean_f,
         'var_start': var_start,
@@ -6389,6 +6441,23 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
         ai = list(res['active_indices']).index(s)
         return np.interp(fg, bps, rl['limit_B'][-1][:, ai])
 
+    # β-PDF(f) at the same moment (t_end) the frame's B(f) was generated,
+    # i.e. the run's converged final mixing state.
+    f_pdf = np.linspace(1.0e-4, 1.0 - 1.0e-4, 400)
+
+    def _pdf_at(res, t_val):
+        max_var = mean_f * (1.0 - mean_f)
+        var_t = mixing_variance(t_val, mean_f, res['m_epsilon'],
+                                 res.get('m_lambda', DEFAULT_M_LAMBDA),
+                                 res.get('m_nu', DEFAULT_M_NU),
+                                 res.get('m_Sc', DEFAULT_M_SC))
+        s_t = max_var / var_t - 1.0
+        alpha_t, beta_t = mean_f * s_t, (1.0 - mean_f) * s_t
+        return _stats.beta.pdf(f_pdf, alpha_t, beta_t)
+
+    def _final_pdf(res):
+        return _pdf_at(res, float(res['t'][-1]))
+
     gmax = {s: max(float(np.max(np.abs(_final_Bcurve(r, s)))) for r in runs) for s in active_indices}
     div_of = _outlier_scale_divisors_by_stream(gmax, {s: s in s1 for s in active_indices})
     _lbl = lambda s: f'{species_list[s]}/{div_of[s]:g}' if s in div_of else species_list[s]
@@ -6399,13 +6468,29 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
 
     fig, ax = plt.subplots(figsize=(8, 5.5))
     ax_r = ax.twinx() if s1 else None
+    ax_pdf = ax.twinx()   # dedicated third axis for the β-PDF(f) overlay
+    if ax_r is not None:
+        ax_pdf.spines['right'].set_position(('outward', 50))
+        # Leave room on the right for the outward-offset third axis, which
+        # would otherwise be clipped outside the saved frame (animation
+        # saves don't get a bbox_inches='tight' pass to rescue it).
+        fig.subplots_adjust(right=0.80)
     _ms, _lw, _leg_fs = _scaled_marker_lw(8, 5.5)
+    _PDF_COLOR = CB_PALETTE[7]   # colour-blind-safe red, high visibility against species colours
 
     def _draw(i):
         res = runs[i]
         ax.clear()
         if ax_r is not None:
             ax_r.clear()
+        ax_pdf.clear()
+        # .clear() resets the y-label (but not the tick marks) back to the
+        # left side on a twinned axis -- restore both explicitly so the PDF
+        # label doesn't land on top of the primary axis's own label.
+        ax_pdf.yaxis.set_label_position('right')
+        ax_pdf.yaxis.tick_right()
+        if ax_r is not None:
+            ax_pdf.spines['right'].set_position(('outward', 50))
         for s in s2:
             ax.plot(fg, _yv(s, _final_Bcurve(res, s)), color=color_map[s], linestyle=ls_map[s],
                     marker=mk_map[s], markevery=max(1, len(fg) // 15), mfc=_face(color_map[s]),
@@ -6417,10 +6502,17 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
                           ms=_ms, lw=_lw, label=_lbl(s))
             ax_r.tick_params(axis='y', labelsize=6)
             ax_r.set_ylim(-0.02 * y1max, y1max)
+        ax_pdf.plot(f_pdf, _final_pdf(res), color=_PDF_COLOR, linestyle='-',
+                    lw=2.2, zorder=5, label='β-PDF(f)')
+        ax_pdf.set_ylabel('β-PDF(f)', fontsize=9, color=_PDF_COLOR)
+        ax_pdf.tick_params(axis='y', labelsize=6, labelcolor=_PDF_COLOR)
+        ax_pdf.set_ylim(bottom=0)
         _h, _l = ax.get_legend_handles_labels()
         if ax_r is not None:
             _h_r, _l_r = ax_r.get_legend_handles_labels()
             _h, _l = _h + _h_r, _l + _l_r
+        _h_pdf, _l_pdf = ax_pdf.get_legend_handles_labels()
+        _h, _l = _h + _h_pdf, _l + _l_pdf
         if len(_l) > 1:
             ax.legend(_h, _l, loc='center right', frameon=False, fontsize=_leg_fs)
         fsb = res['raylimit']['fsb']
@@ -6949,6 +7041,7 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
     # (default 1, unless the reaction is `elementary` or the JSON supplies
     # explicit `orders`).
     rxn_reactants = ode_result['rxn_reactants']
+    k_vals = ode_result['k_vals_base']
     global_to_active = {int(i): pos for pos, i in enumerate(active_indices)}
     order_lookup = [
         {global_to_active[i]: order for i, order in rxn_reactants[j] if i in global_to_active}
@@ -7080,16 +7173,19 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
                 reactant_Cf_pdf[sp_pos] = (B_fp + (M_fp - B_fp) * lam,
                                            order_lookup[j][sp_pos])
 
-            # Rate integrand: β-PDF(f) × ∏ C_i(f)^order_i (no rescaling; row-shared axis)
+            # Rate integrand: k_j × β-PDF(f) × ∏ C_i(f)^order_i (no rescaling;
+            # row-shared axis) -- the k_j factor makes the secondary axis a
+            # true rate density, comparable across reactions/rows.
             ax_pdf = ax.twinx()
             rig_max = 0.0
             if reactant_Cf_pdf:
                 rate_ig = pdf_vals.copy()
                 for Cf_p, order in reactant_Cf_pdf.values():
                     rate_ig *= np.maximum(Cf_p, 0.0) ** order
+                rate_ig *= float(k_vals[j])
                 ax_pdf.plot(f_pdf, rate_ig, color='tab:orange', lw=1.2, ls='--', zorder=0)
                 rig_max = float(rate_ig.max())
-            ax_pdf.set_ylabel('β-PDF·∏C', fontsize=7, color='grey')
+            ax_pdf.set_ylabel('k·β-PDF·∏C', fontsize=7, color='grey')
             ax_pdf.tick_params(axis='y', labelcolor='grey', labelsize=6)
             ax_pdf.set_ylim(bottom=0)
             row_axpdf.append((ax_pdf, rig_max))
@@ -7449,6 +7545,225 @@ def plot_raylimit_reaction_extents(unique_sp_data, ode_result, save_stem=None):
         plt.show()
 
 
+def plot_beta_pdf_heatmap(ode_result, save_stem=None):
+    """Heatmap of the mixture-fraction β-PDF versus f (x) and time (y) over
+    the run's full time history, viewed from above -- the top-down
+    counterpart of the old 3D surface.  Uses the same binned-mass
+    computation, viridis colormap, and log colour scale as the ray_limit
+    C(f)/B(f) heatmaps (:func:`_raylimit_beta_weight_grid`), so the three
+    read alike; the PDF depends only on mean_f and the
+    m_epsilon/m_lambda/m_nu/m_Sc mixing constants, not on weight_method.
+    """
+    import pathlib as _pathlib
+    import matplotlib.colors as mcolors
+
+    t = np.asarray(ode_result['t'])
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+
+    f_grid = np.linspace(0.0, 1.0, 200)
+    W = _raylimit_beta_weight_grid(ode_result, t, f_grid)
+
+    vmax = float(np.nanmax(W))
+    if not (vmax > 0):
+        return
+    floor = vmax * 1.0e-3
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.pcolormesh(f_grid, t, np.clip(W, floor, None), shading='auto', cmap='viridis',
+                       norm=mcolors.LogNorm(vmin=floor, vmax=vmax))
+    # Same overlay convention as the ray_limit Cf/Bf heatmaps: red dotted for
+    # fs(t) (only meaningful for ray_limit); mean_f is constant in f, so it's
+    # a plain vertical line rather than a f(t) curve.
+    ax.axvline(mean_f, color='gray', linestyle=':', linewidth=1.3, alpha=0.9)
+    rl = ode_result.get('raylimit')
+    _has_fs = False
+    if rl is not None and rl.get('fsb') is not None:
+        fsb = np.asarray(rl['fsb'], dtype=float)
+        fs_mask = np.isfinite(fsb) & (fsb > 0.0) & (fsb < 1.0)
+        if np.any(fs_mask):
+            ax.plot(fsb[fs_mask], t[fs_mask], color=CB_PALETTE[7], linestyle=':', linewidth=1.5)
+            _has_fs = True
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('β-PDF(f)  (binned mass / Δf)', fontsize=8)
+    ax.set_xlabel('f', fontsize=9)
+    ax.set_ylabel('t (s)', fontsize=9)
+    ax.set_xlim(0.0, 1.0)
+    wm = ode_result.get('weight_method', '')
+    ax.set_title(f'β-PDF(f) vs f and time  '
+                f'(ε={m_epsilon:.4g},  mean_f={mean_f:.4f}{",  " + wm if wm else ""})',
+                fontsize=10)
+    _caption = 'gray dotted: mean_f'
+    if _has_fs:
+        _caption += ';  red dotted: fs(t)'
+    fig.text(0.5, 0.005, _caption, ha='center', va='bottom', fontsize=8)
+    fig.tight_layout(rect=[0, 0.03, 1, 1])
+
+    if save_stem is not None:
+        _wm = ode_result.get('weight_method', 'unknown')
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_{_wm}_beta_pdf_heatmap.png')
+    else:
+        plt.show()
+
+
+def plot_f_blob_patterns(ode_result, save_stem=None, image_size=200, seed=0):
+    """Synthetic 'blob pattern' images of the local mixture-fraction field
+    f(x,y), one panel per fixed conversion checkpoint of the stream-1
+    limiting reactant (0%, 10%, 20%, ..., 90%, 99.9%).
+
+    Each panel is a spatially-correlated random field built by Gaussian-
+    blurring white noise then remapping it (via the normal CDF -> Beta
+    inverse CDF) so its marginal distribution is *exactly* the same
+    Beta(alpha(t), beta(t)) used for this run's β-PDF(f) elsewhere -- pure
+    stream 1 = white (f=1), pure stream 2 = black (f=0), partially-mixed =
+    grayscale in between.  The same underlying noise realisation is reused
+    at every checkpoint (only the blur length scale changes, shrinking with
+    I_s(t) = var(t)/max_var) so the panels read as one field coarsening
+    over time rather than unrelated static.
+    """
+    import pathlib as _pathlib
+    from scipy.ndimage import gaussian_filter
+
+    species_list = ode_result['species']
+    t = np.asarray(ode_result['t'])
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    m_lambda = ode_result.get('m_lambda', DEFAULT_M_LAMBDA)
+    m_nu = ode_result.get('m_nu', DEFAULT_M_NU)
+    m_Sc = ode_result.get('m_Sc', DEFAULT_M_SC)
+
+    L_name = ode_result.get('stream1_closure', {}).get('limiting_reactant')
+    if L_name is None:
+        return
+    L_idx = species_list.index(L_name)
+    y0_L = float(ode_result['y'][0, L_idx])
+    if not y0_L:
+        return
+    conv = 1.0 - ode_result['y'][:, L_idx] / y0_L
+
+    targets = [0.0, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.999]
+    idxs, seen = [], set()
+    for target in targets:
+        k = int(np.argmin(np.abs(conv - target)))
+        if k not in seen:
+            seen.add(k)
+            idxs.append(k)
+    idxs.sort(key=lambda k: t[k])
+    if not idxs:
+        return
+
+    max_var = mean_f * (1.0 - mean_f)
+    rng = np.random.default_rng(seed)
+    base_noise = rng.standard_normal((image_size, image_size))
+
+    # Blob correlation length shrinks with I_s(t) -- large, segregated blobs
+    # near t=0 (I_s~1), fine-grained texture near full mixing (I_s~0).
+    BLUR_MIN, BLUR_MAX = 1.0, image_size / 4.0
+
+    n_cols = min(4, len(idxs))
+    n_rows = (len(idxs) + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.0 * n_cols, 3.0 * n_rows), squeeze=False)
+
+    for panel, k in enumerate(idxs):
+        ax = axes[panel // n_cols][panel % n_cols]
+        t_k = float(t[k])
+        var_t = mixing_variance(t_k, mean_f, m_epsilon, m_lambda, m_nu, m_Sc)
+        ios_t = var_t / max_var
+        s_t = max_var / var_t - 1.0
+        alpha_t, beta_t = mean_f * s_t, (1.0 - mean_f) * s_t
+
+        blur_sigma = BLUR_MIN + (BLUR_MAX - BLUR_MIN) * ios_t
+        field = gaussian_filter(base_noise, sigma=blur_sigma, mode='wrap')
+        field = (field - field.mean()) / field.std()
+        u = _stats.norm.cdf(field)
+        f_field = _stats.beta.ppf(u, alpha_t, beta_t)
+
+        ax.imshow(f_field, cmap='gray', vmin=0.0, vmax=1.0, origin='lower')
+        ax.set_title(f't={t_k:.4g} s\nI_s={ios_t:.3g}', fontsize=8)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for panel in range(len(idxs), n_rows * n_cols):
+        axes[panel // n_cols][panel % n_cols].set_visible(False)
+
+    wm = ode_result.get('weight_method', '')
+    fig.suptitle(f'f(x,y) blob patterns  '
+                f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g}{",  " + wm if wm else ""})',
+                fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    if save_stem is not None:
+        _wm = ode_result.get('weight_method', 'unknown')
+        _save_fig(fig, save_stem,
+                  f'{_pathlib.Path(save_stem).name}_{_wm}_f_blob_patterns.png')
+    else:
+        plt.show()
+
+
+def plot_f_blob_patterns_movie(ode_result, save_stem=None, fps=15, image_size=150, seed=0):
+    """Animate the synthetic f(x,y) blob pattern (see
+    :func:`plot_f_blob_patterns`) continuously over every output time step
+    of one run, rather than just the fixed conversion checkpoints."""
+    import pathlib as _pathlib
+    import matplotlib.animation as animation
+    from scipy.ndimage import gaussian_filter
+
+    t = np.asarray(ode_result['t'])
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    m_lambda = ode_result.get('m_lambda', DEFAULT_M_LAMBDA)
+    m_nu = ode_result.get('m_nu', DEFAULT_M_NU)
+    m_Sc = ode_result.get('m_Sc', DEFAULT_M_SC)
+    n_t = len(t)
+    if n_t < 2:
+        return
+
+    max_var = mean_f * (1.0 - mean_f)
+    rng = np.random.default_rng(seed)
+    base_noise = rng.standard_normal((image_size, image_size))
+    BLUR_MIN, BLUR_MAX = 1.0, image_size / 4.0
+
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    im = ax.imshow(np.zeros((image_size, image_size)), cmap='gray', vmin=0.0, vmax=1.0, origin='lower')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    wm = ode_result.get('weight_method', '')
+
+    def _draw(k):
+        t_k = float(t[k])
+        var_t = mixing_variance(t_k, mean_f, m_epsilon, m_lambda, m_nu, m_Sc)
+        ios_t = var_t / max_var
+        s_t = max_var / var_t - 1.0
+        alpha_t, beta_t = mean_f * s_t, (1.0 - mean_f) * s_t
+
+        blur_sigma = BLUR_MIN + (BLUR_MAX - BLUR_MIN) * ios_t
+        field = gaussian_filter(base_noise, sigma=blur_sigma, mode='wrap')
+        field = (field - field.mean()) / field.std()
+        u = _stats.norm.cdf(field)
+        f_field = _stats.beta.ppf(u, alpha_t, beta_t)
+
+        im.set_data(f_field)
+        ax.set_title(f't = {t_k:.4g} s   (I_s = {ios_t:.3g})', fontsize=10)
+        return [im]
+
+    fig.suptitle(f'f(x,y) blob pattern  '
+                f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g}{",  " + wm if wm else ""})',
+                fontsize=11)
+    anim = animation.FuncAnimation(fig, _draw, frames=n_t, interval=1000.0 / fps)
+
+    if save_stem is not None:
+        _wm = ode_result.get('weight_method', 'unknown')
+        plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'{_pathlib.Path(save_stem).name}_{_wm}_f_blob_patterns_movie.mp4'
+        anim.save(out_path, writer='ffmpeg', fps=fps)
+        plt.close(fig)
+        print(f"Saved to {out_path}")
+    else:
+        plt.show()
+
+
 def _clamp_total(res):
     """Return the total number of clamp steps across all species for one ODE result."""
     wm = res.get('weight_method', '')
@@ -7491,6 +7806,31 @@ def save_ios_csv(mean_f, m_epsilon, t_end, save_stem, n_pts=500,
         for t, ios in zip(t_vals, ios_vals):
             writer.writerow([float(t), float(ios)])
     print(f"[IoS]   intensity of segregation saved to {path}")
+
+
+def save_species_vs_time_csv(ode_result, save_stem):
+    """Save species concentration vs time from an ODE solution to CSV.
+
+    Columns: t (s), then one column per species (in ``ode_result['species']``
+    order). File is named <save_stem>_<weight_method>_species_vs_time.csv."""
+    import pathlib as _pathlib
+    import csv as _csv
+
+    t = ode_result['t']
+    y = ode_result['y']
+    species_list = ode_result['species']
+    wm = ode_result.get('weight_method', 'run')
+
+    stem = _pathlib.Path(save_stem)
+    plots_dir = stem.parent / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    path = plots_dir / f'{stem.name}_{wm}_species_vs_time.csv'
+    with open(path, 'w', newline='') as fh:
+        writer = _csv.writer(fh)
+        writer.writerow(['t (s)'] + list(species_list))
+        for i in range(len(t)):
+            writer.writerow([float(t[i])] + [float(v) for v in y[i]])
+    print(f"[{wm}]   species concentrations vs time saved to {path}")
 
 
 def _method_summary(results_list, label=''):
@@ -7628,6 +7968,15 @@ if __name__ == '__main__':
     M_NU = _cfg.get('m_nu', DEFAULT_M_NU)
     M_SC = _cfg.get('m_Sc', DEFAULT_M_SC)
 
+    # Fractional conversion of the stream-1 limiting reactant that ends the
+    # ODE integration (the CVODE terminal event); default matches
+    # integrate_species_odes' own default of 0.999.
+    CONVERSION_TARGET = _cfg.get('conversion_target', 0.999)
+
+    # Optional: write species concentration vs time (from the ODE solution)
+    # to a CSV per base-case run.
+    SAVE_SPECIES_CSV = _cfg.get('save_species_csv', False)
+
     # ray_limit only: uniform rate constant for the initial mass-action-rate
     # fallback ray, e.g. "initial_ray": 1.0.  Omit to use the real k_j.
     RAYLIMIT_INITIAL_RAY_K = _cfg.get('initial_ray')
@@ -7679,6 +8028,7 @@ if __name__ == '__main__':
                 ode_atol=_cfg.get('atol'),
                 reaction_orders=_cfg.get('orders'),
                 m_lambda=M_LAMBDA, m_nu=M_NU, m_Sc=M_SC,
+                conversion_target=CONVERSION_TARGET,
                 raylimit_initial_ray_k=RAYLIMIT_INITIAL_RAY_K)
             if _res.get('method_ran', True):
                 ode_results.append(_res)
@@ -7711,6 +8061,8 @@ if __name__ == '__main__':
                 save_ios_csv(BETA_MEAN_F, _eps, _t_end_ref, _eps_save,
                             m_lambda=M_LAMBDA, m_nu=M_NU, m_Sc=M_SC)
         for _res in ode_results:
+            if SAVE_SPECIES_CSV:
+                save_species_vs_time_csv(_res, save_stem=_eps_save)
             if not heatmaps_only:
                 plot_ode_limit_averages(_res, save_stem=_eps_save)
                 plot_ode_beta_snapshots(unique_sp_data, _res, save_stem=_eps_save)
@@ -7725,6 +8077,10 @@ if __name__ == '__main__':
                 plot_raylimit_limit_grid(_res, save_stem=_eps_save)
             plot_raylimit_Cf_heatmap(_res, save_stem=_eps_save)
             plot_raylimit_Bf_heatmap(_res, save_stem=_eps_save)
+            plot_beta_pdf_heatmap(_res, save_stem=_eps_save)
+            plot_f_blob_patterns(_res, save_stem=_eps_save)
+            if make_movie:
+                plot_f_blob_patterns_movie(_res, save_stem=_eps_save)
             if not heatmaps_only:
                 plot_raylimit_species_limits_static(unique_sp_data, _res, save_stem=_eps_save)
                 if make_movie:
