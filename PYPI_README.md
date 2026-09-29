@@ -48,18 +48,20 @@ Minimal config:
 
 There are two parts which complement each other:
 
-In the first part, under the mixing-limited assumption, reactions run infinitely fast relative to
-turbulent mixing, so the achievable concentration at each mixture fraction is bounded
-by an exact, LP(linear programming)-derived reaction-subset limit. 
+In the first part, under the mixing-limited assumption, all $2^{N_R} reaction subsets run infinitely fast relative to
+turbulent mixing and the achievable concentration at each mixture fraction is bounded
+by an exact, LP(linear programming)-derived reaction-subset limit. Plots of the limits are generated and subsets that produce duplicate limits are removed.
 
-In the second part, three alternative closures build the ODE's working
-profile `C_w(f)` as the reactions progress:
+In the second part, the reaction system is solved in a plug-flow reaction zone, integrating the related ordinary differential equations (ODE). Three alternative closures build the ODE's working
+profile `C_w(f)` for each species as the reactions progress:
 
 | Method | Approach |
 |---|---|
 | `ray_limit` | A single, continuously-rotating "selectivity ray" complete-reaction limit (the default) |
 | `blend_fs` | A weighted blend of a handful of user-chosen enumerated subset limits |
 | `linear_interp` | Bracketing interpolation between the two enumerated subset limits nearest the current state |
+
+The most general and useful of the closures is ray_limit. 
 
 More detail and worked derivations are available in the author's [blog](https://joehannon.github.io/blog/)
 and the [ChemRxiv preprint](https://chemrxiv.org/doi/abs/10.26434/chemrxiv.15006522/v1).
