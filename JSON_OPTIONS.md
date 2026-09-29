@@ -2,7 +2,7 @@
 
 Config file passed as `argv[1]` to `species_limits.py` (defaults to
 `inputs/input_example.json`). Keys below are read in `if __name__ ==
-'__main__'` (species_limits.py:7213-7429).
+'__main__'`.
 
 ## Required
 
