@@ -46,10 +46,14 @@ Minimal config:
 
 ## How it works
 
-Under the mixing-limited assumption, reactions run infinitely fast relative to
+There are two parts which complement each other:
+
+In the first part, under the mixing-limited assumption, reactions run infinitely fast relative to
 turbulent mixing, so the achievable concentration at each mixture fraction is bounded
-by an exact, LP-derived reaction-subset limit. Three closures build the ODE's working
-profile `C_w(f)` from that limit as the reaction progresses:
+by an exact, LP(linear programming)-derived reaction-subset limit. 
+
+In the second part, three alternative closures build the ODE's working
+profile `C_w(f)` as the reactions progress:
 
 | Method | Approach |
 |---|---|
@@ -57,7 +61,7 @@ profile `C_w(f)` from that limit as the reaction progresses:
 | `blend_fs` | A weighted blend of a handful of user-chosen enumerated subset limits |
 | `linear_interp` | Bracketing interpolation between the two enumerated subset limits nearest the current state |
 
-More detail and worked derivations are in the project's [blog](https://joehannon.github.io/blog/)
+More detail and worked derivations are available in the author's [blog](https://joehannon.github.io/blog/)
 and the [ChemRxiv preprint](https://chemrxiv.org/doi/abs/10.26434/chemrxiv.15006522/v1).
 
 ## License
