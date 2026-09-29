@@ -48,7 +48,7 @@ Minimal config:
 
 There are two parts which complement each other:
 
-In the first part, under the mixing-limited assumption, all $2^{N_R}% reaction subsets run infinitely fast relative to
+In the first part, under the mixing-limited assumption, all $2^{N_R}$ reaction subsets run infinitely fast relative to
 turbulent mixing and the achievable concentration at each mixture fraction is bounded
 by an exact, LP(linear programming)-derived reaction-subset limit. Plots of the limits are generated and subsets that produce duplicate limits are removed.
 
