@@ -54,4 +54,4 @@ Config file passed as `argv[1]` to `species_limits.py` (defaults to
 
 ## CLI flags (not JSON, passed on the command line)
 
-`--sweep` (ε sweep of product fractions), `--movie` (ray_limit B(f) movies), `--pdf` (also save vector PDFs), `--heatmaps-only` (skip everything except Cf/Bf heatmaps).
+`--sweep` (ε sweep of product fractions), `--movie` (ray_limit B(f) movies, plus a parallel-coordinates movie of the selectivity ray, fs* and I_s), `--pdf` (also save vector PDFs), `--heatmaps-only` (skip everything except Cf/Bf heatmaps).

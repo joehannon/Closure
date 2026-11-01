@@ -6402,6 +6402,124 @@ def plot_raylimit_limit_movie(ode_result, save_stem=None, fps=15):
         plt.show()
 
 
+def plot_raylimit_ray_parcoords_movie(ode_result, save_stem=None, fps=8, n_frames=80):
+    """Animate ray_limit's selectivity ray as a parallel-coordinates plot, one
+    line per frame: axes t, the unit ray d/‖d‖ (d = y − y0) per active species,
+    fs* and the intensity of segregation I_s.  Frames are the output steps
+    nearest ``n_frames`` evenly spaced conversions of the stream-1 limiting
+    reactant (evenly spaced times if there is none), preceded by the ray at the
+    first output step; every axis is scaled to its own min–max over all frames."""
+    import pathlib as _pathlib
+    import matplotlib.animation as animation
+    from matplotlib.colors import Normalize
+
+    rl = ode_result.get('raylimit')
+    if rl is None:
+        return
+    t = np.asarray(ode_result['t'])
+    y_full = np.asarray(ode_result['y'])
+    species_list = ode_result['species']
+    active_indices = list(ode_result['active_indices'])
+    if not active_indices or len(t) < 3:
+        return
+    fsb = np.asarray(rl['fsb'], dtype=float)
+    Y1, Y2 = np.asarray(rl['Y1']), np.asarray(rl['Y2'])
+    mean_f = ode_result['mean_f']
+    m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
+    Is = np.array([mixing_variance(tt, mean_f, m_epsilon, ode_result['m_lambda'], ode_result['m_nu'],
+                                   ode_result['m_Sc']) for tt in t]) / (mean_f * (1.0 - mean_f))
+
+    D = y_full[:, active_indices] - y_full[0, active_indices]
+    nrm = np.linalg.norm(D, axis=1)
+    L_name = (ode_result.get('stream1_closure') or {}).get('limiting_reactant')
+    if L_name is not None:
+        L = species_list.index(L_name)
+        prog = 1.0 - y_full[:, L] / y_full[0, L]
+        prog_lbl = f'{L_name} conversion'
+    else:
+        prog, prog_lbl = t / t[-1], 't / t_end'
+
+    # Ray at the first output step; its fs* is evaluated from that same Δ
+    # (κ1, κ2 construction), since the code may still be on the mass-action
+    # fallback ray there.
+    d1 = D[1]
+    Ya1, Ya2 = Y1[active_indices], Y2[active_indices]
+    cons = d1 < -1e-300
+    m1, m2 = cons & (Ya2 == 0), cons & (Ya1 == 0)
+    fs1 = np.nan
+    if m1.any() and m2.any():
+        k1 = np.min(Ya1[m1] / -d1[m1])
+        k2 = np.min(Ya2[m2] / -d1[m2])
+        fs1 = k2 / (k1 + k2)
+    ok = (nrm > 0) & np.isfinite(fsb)
+    ok[:2] = False
+    cand = np.where(ok)[0]
+    if cand.size == 0 or nrm[1] == 0:
+        return
+    targets = np.linspace(prog[cand[0]], prog[cand[-1]], n_frames)
+    sel = np.unique([cand[np.argmin(np.abs(prog[cand] - p))] for p in targets])
+    frames = [1] + list(sel)
+    fs_fr = np.array([fs1] + list(fsb[sel]))
+
+    names = ['t (s)'] + [species_list[s] for s in active_indices] + ['fs*', 'I_s']
+    V = np.column_stack([t[frames], D[frames] / nrm[frames, None], fs_fr, Is[frames]])
+    lo, hi = np.nanmin(V, axis=0), np.nanmax(V, axis=0)
+    ray_cols = range(1, 1 + len(active_indices))
+    lo[ray_cols], hi[ray_cols] = -1.0, 1.0   # unit-ray components share the absolute range [-1, 1]
+    Z = (V - lo) / np.where(hi > lo, hi - lo, 1.0)
+    n = len(names)
+
+    cmap = plt.get_cmap('viridis')
+    norm = Normalize(t[frames].min(), t[frames].max())
+    fig, ax = plt.subplots(figsize=(max(8.0, 1.3 * n), 5.5))
+    for j in range(n):
+        ax.axvline(j, color='#999999', lw=0.8, zorder=0)
+        ax.text(j, 1.02, f'{hi[j]:.4g}', ha='center', va='bottom', fontsize=8, color='#444444')
+        ax.text(j, -0.02, f'{lo[j]:.4g}', ha='center', va='top', fontsize=8, color='#444444')
+    for j in ray_cols:   # zero marker on the ray-component axes
+        ax.plot([j - 0.06, j + 0.06], [0.5, 0.5], color='#999999', lw=0.8, zorder=0)
+        ax.text(j - 0.08, 0.5, '0', ha='right', va='center', fontsize=8, color='#444444')
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(names, fontsize=11)
+    ax.xaxis.set_ticks_position('top')
+    ax.tick_params(axis='x', pad=18, length=0)
+    ax.set_yticks([])
+    ax.set_ylim(-0.08, 1.08)
+    ax.set_xlim(-0.3, n - 0.7)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    fig.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), ax=ax, pad=0.02,
+                 fraction=0.03).set_label('t (s)')
+    line, = ax.plot(range(n), Z[0], lw=2.5)
+    cap = ax.text(0.5, -0.13, '', transform=ax.transAxes, ha='center', fontsize=11)
+    fig.suptitle(f'ray_limit selectivity ray d = y − y⁰, unit vector d/‖d‖  '
+                 f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g})\n'
+                 f'ray components on a common [−1, 1] scale, other axes min–max; frames evenly spaced in {prog_lbl}',
+                 fontsize=10, y=0.995)
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.14)   # room for the per-frame caption
+
+    def _draw(i):
+        k = frames[i]
+        line.set_ydata(Z[i])
+        line.set_color(cmap(norm(t[k])))
+        cap.set_text(f't = {t[k]:.4g} s     {prog_lbl} = {prog[k]:.1%}     '
+                     f'fs* = {fs_fr[i]:.4f}     I_s = {Is[k]:.4f}')
+        return line, cap
+
+    anim = animation.FuncAnimation(fig, _draw, frames=len(frames), interval=1000.0 / fps)
+
+    if save_stem is not None:
+        plots_dir = _pathlib.Path(save_stem).parent / 'plots'
+        plots_dir.mkdir(exist_ok=True)
+        out_path = plots_dir / f'{_pathlib.Path(save_stem).name}_raylimit_ray_parcoords_movie.mp4'
+        anim.save(out_path, writer='ffmpeg', fps=fps)
+        plt.close(fig)
+        print(f"Saved to {out_path}")
+    else:
+        plt.show()
+
+
 def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
     """Animate ray_limit's final-state complete-reaction limit B(f) across an
     ε sweep — one frame per ε (increasing order), showing how the converged
@@ -8086,6 +8204,7 @@ if __name__ == '__main__':
                 if make_movie:
                     plot_raylimit_limit_movie(_res, save_stem=_eps_save)
                     plot_raylimit_species_limits_movie(unique_sp_data, _res, save_stem=_eps_save)
+                    plot_raylimit_ray_parcoords_movie(_res, save_stem=_eps_save)
                 plot_cprofile_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
                 plot_cprofile_reactant_product_per_reaction(unique_sp_data, _res, save_stem=_eps_save)
                 plot_raylimit_reaction_extents(unique_sp_data, _res, save_stem=_eps_save)
