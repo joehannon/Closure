@@ -18,7 +18,7 @@ Config file passed as `argv[1]` to `species_limits.py` (defaults to
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `rate_constants` | `{label: float}` | all `1000.0` (or errors out) | Rate constant per reaction label. If every reaction's constant is zero, the run aborts (nothing can react). |
-| `orders` | `[null \| number \| {species: number}, ...]` | `null` per reaction | One entry per reaction, same order as `reactions`. `null` → default order (stoichiometry if `elementary`, else 1 per reactant). A number sets a single overall order; a `{species: exponent}` dict sets a per-species rate-law exponent. |
+| `orders` | `[null \| number \| {species: number}, ...]` | `null` per reaction | One entry per reaction, same order as `reactions`. `null` → default order (stoichiometry if `elementary`, else 1 per reactant). A number sets that exponent for every reactant of the reaction; a `{species: exponent}` dict sets a per-species rate-law exponent (unlisted reactants default to 1). |
 
 ## Mixing model
 
@@ -36,7 +36,7 @@ Config file passed as `argv[1]` to `species_limits.py` (defaults to
 |---|---|---|---|
 | `weight_methods` | `[int, ...]` | `[2]` | Which method(s) to run: `1`=`blend_fs`, `2`=`ray_limit`, `3`=`linear_interp`. Runs each once, in the order given (dupes collapsed). |
 | `initial_ray` | float | none (uses real kⱼ) | `ray_limit` only: uniform rate constant for the initial mass-action-rate fallback ray. |
-| `blend_subsets` | `[int, ...]` | none (all eligible subsets) | `blend_fs` only: restrict which subset numbers are used for blending. Does **not** shrink the subset pool used by other methods (see `keep_subsets`/`remove_subsets` below). |
+| `blend_subsets` | `[int, ...]` | none (blend_fs does not run) | `blend_fs` only: the subset numbers to blend (exactly these; at least 2 valid ones are needed, otherwise blend_fs does not run). Does **not** shrink the subset pool used by other methods (see `keep_subsets`/`remove_subsets` below). |
 
 ## Subset selection
 
@@ -51,7 +51,14 @@ Config file passed as `argv[1]` to `species_limits.py` (defaults to
 |---|---|---|---|
 | `rtol` | float | solver default | ODE relative tolerance. |
 | `atol` | float | solver default | ODE absolute tolerance. |
+| `conversion_target` | float | `0.999` | Fractional conversion of the stream-1 limiting reactant at which the integration stops (the CVODE terminal event). Used by the base-case runs and the `--sweep` ε sweep. |
+
+## Outputs
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `save_species_csv` | bool | `false` | Also write species concentration vs time for each base-case run to `plots/<stem>_<method>_species_vs_time.csv`. |
 
 ## CLI flags (not JSON, passed on the command line)
 
-`--sweep` (ε sweep of product fractions), `--movie` (ray_limit B(f) movies, plus a parallel-coordinates movie of the selectivity ray, fs* and I_s), `--pdf` (also save vector PDFs), `--heatmaps-only` (skip everything except Cf/Bf heatmaps).
+`--sweep` (ε sweep of product fractions), `--movie` (movies: ray_limit B(f) and species-limits movies, a parallel-coordinates movie of the selectivity ray, fs* and I_s, the f blob-pattern movie, and with `--sweep` the ε-sweep movies including the Cf/Bf heatmap movies), `--pdf` (also save vector PDFs), `--heatmaps-only` (skip every plot except the Cf/Bf and β-PDF heatmaps and the f blob patterns, and their movies).

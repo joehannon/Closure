@@ -20,7 +20,9 @@ DEFAULT_M_SC = 4000
 
 # Fixed per-method line/marker style, keyed by weight_method name (not by
 # position in a list), so a given method always looks the same across every
-# plot that overlays results from multiple methods.
+# plot that overlays results from multiple methods.  Most callers treat any
+# non-None 'mfc' as "use _face(color)" (a filled face), so most plots draw these
+# markers filled; "hollow" below describes mfc='none' itself.
 _WM_STYLE = {
     'blend_fs':      dict(ls='-',  mk='o', mfc='none', mew=1.4),  # hollow circle,   solid
     'ray_limit':     dict(ls='-',  mk='s', mfc='none', mew=1.4),  # hollow square,   solid
@@ -98,8 +100,9 @@ _MARKER_FACE_ALPHA = 1.0
 
 
 def _face(color, alpha=_MARKER_FACE_ALPHA):
-    """RGBA for a semi-transparent marker face matching *color* -- the filled,
-    half-alpha marker experiment (in place of the previous hollow mfc='none')."""
+    """RGBA for a marker face matching *color* at _MARKER_FACE_ALPHA (currently
+    1.0, i.e. opaque) -- the filled-marker experiment (in place of the
+    previous hollow mfc='none')."""
     import matplotlib.colors as mcolors
     return mcolors.to_rgba(color, alpha)
 
@@ -203,10 +206,10 @@ def analyze_stream_limit_system(species_labels, reaction_labels, nu_reactants, n
         fs = None
         fs_extents = {}
     else:
-        # Joint LP includes every active reaction (cross-stream, single-stream that
-        # shares a reactant, and catalytic). Pure catalysts contribute an upper-bound
-        # inequality instead of a stoichiometric equation so they cannot drive the
-        # system below zero.
+        # Every reduced reaction is passed in: single-stream reactions are
+        # pre-solved on their own feeds, coupling cross-stream reactions set fs in
+        # the LP, and catalyst-only-linked reactions are solved afterwards (a
+        # catalyst is only a presence gate, not a bounding constraint).
         fs, fs_extents = derive_fs_from_cross_stream_reactions(
             N_reduced, nu_r_reduced, nu_p_reduced, joint_candidates, Y1, Y2, stream_labels)
         if fs is None:
@@ -214,7 +217,7 @@ def analyze_stream_limit_system(species_labels, reaction_labels, nu_reactants, n
         else:
             print(f"\nDerived mixture fraction limit fs = {fs:.6f}")
             # Recompute extents at fs using the phased model (single-stream reactions
-            # resolved first, then all cross-stream reactions jointly).
+            # resolved first, then coupling cross-stream reactions, then catalyzed ones).
             all_active_at_fs = _cascade_active_reactions(
                 nu_r_reduced, nu_p_reduced, joint_candidates,
                 np.asarray(Y1, dtype=float), np.asarray(Y2, dtype=float))
@@ -452,7 +455,8 @@ def derive_fs_from_cross_stream_reactions(N, nu_reactants, nu_products, candidat
     boundaries (f=1 for stream-1-only, f=0 for stream-2-only) to get effective
     feeds Y1_eff and Y2_eff for the cross-stream balance.
 
-    Step 2: LP over [f, xi_coupling...] maximising total extent subject to
+    Step 2: LP over [f, xi_coupling...] maximising fed-consumption-weighted
+    total extent subject to
     species non-negativity (as inequalities).  Using inequalities rather than
     equalities means reactions with multiple co-reactants from the same
     stream are handled correctly: only the most limiting co-reactant is
@@ -731,7 +735,7 @@ def _solve_extent_lp(N, nu_reactants, nu_products, active_indices, Y_avail, fed_
     extent is still correctly bounded by *Y_avail* (e.g. a shared reactant
     genuinely produced/consumed by another reaction); only the binary
     presence check for its catalyst(s) uses *Y_presence*.  Defaults to
-    *Y_avail* when not given (unchanged behaviour).
+    *Y_avail* when not given.
     """
     if not active_indices:
         return {}
@@ -834,8 +838,9 @@ def solve_max_extents_at_f(N, nu_reactants, nu_products, active_indices, f, Y1, 
       - No such competitor (or fs unknown): presence is checked against the
         raw mixing line at this f -- a catalyst's net stoichiometry is zero,
         so it's a question of whether it exists in the feed at all, not how
-        much some other reaction leaves behind.  Reacts fully for any f>0
-        (up to its own real reactants' limits).
+        much some other reaction leaves behind.  Reacts fully wherever the
+        catalyst is fed -- any f>0 for a stream-1 catalyst, any f<1 for a
+        stream-2 catalyst (up to its own real reactants' limits).
       - A genuine competitor IS active (e.g. R1 also consuming HCl): the
         catalyst is merely LIMITED below fs, not absent -- present in the
         raw feed, just scarcer than the coupling reaction's demand.  The
@@ -1027,36 +1032,30 @@ def generate_line_segments(species_labels, Y1, Y2, results):
 
 
 def _parametric_breakpoints(N, nu_r, nu_p, all_active, Y1, Y2, fs=None):
-    """Return the exact f-values where the two-phase LP solution changes slope.
+    """Return the exact f-values where the phased LP solution changes slope.
 
     The LP solution is piecewise affine in f; breakpoints occur at:
       - the endpoints 0 and 1,
       - fs (the stoichiometric mixture fraction, if known),
-      - any f in (0, 1) where the effective cross-stream available feed
-        b(f) = Y1_eff·f + Y2_eff·(1−f) crosses zero for a fed species.
+      - ε-offset points (ε, 1−ε, fs±ε) bracketing catalyst presence steps
+        for uncontested catalytic reactions (see below).
+    (The effective feeds Y1_eff, Y2_eff are non-negative after the single-stream
+    presolve, so their mixing line b(f) = Y1_eff·f + Y2_eff·(1−f) never crosses
+    zero inside (0, 1) and adds no breakpoints of its own.)
 
     Solving the LP only at these points and connecting with straight lines gives
     exact — not merely approximate — concentration profiles.
     """
     Y1f = np.asarray(Y1, dtype=float)
     Y2f = np.asarray(Y2, dtype=float)
-    fed_mask = (Y1f > 0) | (Y2f > 0)
     stream_labels = identify_stream_feeds(Y1f, Y2f)
     ss1, ss2, _ = _split_by_stream(nu_r, stream_labels, all_active)
 
     Y1_eff, Y2_eff, _, _ = _presolve_single_stream(N, nu_r, nu_p, ss1, ss2, Y1f, Y2f)
 
-    # b(f) = Y2_eff + f*(Y1_eff - Y2_eff); zeros in (0,1) are basis-change candidates.
     breakpoints = {0.0, 1.0}
     if fs is not None and 0.0 < fs < 1.0:
         breakpoints.add(float(fs))
-    b0 = Y2_eff
-    db = Y1_eff - Y2_eff
-    for s in np.where(fed_mask)[0]:
-        if abs(db[s]) > 1e-12:
-            f_zero = float(-b0[s] / db[s])
-            if 1e-9 < f_zero < 1.0 - 1e-9:
-                breakpoints.add(f_zero)
 
     # For a catalytic reaction with NO genuine coupling competitor for its
     # catalyst active in this subset, the catalyst's raw feed is untouched by
@@ -1069,7 +1068,8 @@ def _parametric_breakpoints(N, nu_r, nu_p, all_active, Y1, Y2, fs=None):
     # the catalyst is merely LIMITED (not absent) below fs -- present in the
     # raw feed, just scarcer than the coupling reaction's demand -- and the
     # catalyzed reaction's extent ramps linearly from the mixing line at f=0
-    # to fully reacted at fs (see `_solve_extent_lp`'s Y_presence handling).
+    # to fully reacted at fs (see the contested-catalyst branch of
+    # `solve_max_extents_at_f`).
     # That's already exactly linear between the plain endpoints 0 and fs, so
     # no extra interior breakpoint should be added for it.
     _EPS = 1e-3
@@ -1199,6 +1199,7 @@ def export_all_subsets_json(species_labels, reaction_labels, nu_reactants, nu_pr
       "meta": { "species", "reactions", "stream_1_feed", "stream_2_feed" },
       "subsets": [
         {
+          "subset_num":    int,     // 0-based subset index ([] subset = 0)
           "reactions":     [...],   // labels of active reactions ([] = no-reaction)
           "fs":            float | null,
           "breakpoints":   [f0, f1, ...],
@@ -1328,8 +1329,8 @@ def count_unique_profiles(subsets, species_labels):
 def filter_subsets_by_num(lines_data, keep=None, discard=None):
     """Retain only selected reaction subsets before per-species deduplication.
 
-    Subsets are selected by their integer ``subset_num`` (as printed by
-    :func:`count_unique_profiles` and stored in the ``lines_*.json`` schema).
+    Subsets are selected by their integer ``subset_num`` (as assigned by
+    :func:`export_all_subsets_json` and stored in the ``lines_*.json`` schema).
     ``keep`` is an optional whitelist of subset_nums; ``discard`` an optional
     blacklist applied afterwards.  With both ``None`` every subset is retained
     (the default), so omitting the corresponding config fields leaves the ODE
@@ -1373,7 +1374,8 @@ def export_unique_species_json(lines_data, output_path):
     (same breakpoints and slope/intercept pairs, rounded to 9 d.p.) are grouped
     together.  Each group is written once under a key formed by joining the
     subset_nums of every member with underscores.  All-zero / missing profiles
-    are omitted.
+    are grouped into a single all-zero entry (breakpoints [0, 1], segments
+    [[0, 0]]); a species with no non-zero profile in any subset is omitted.
 
     Schema
     ------
@@ -1826,7 +1828,7 @@ def plot_unique_species_profiles(unique_sp_data, save_stem=None):
     """One subplot per species; one line per unique all_reactions profile.
 
     Each line is labelled with its concatenated subset key (e.g. '0_2_5'),
-    using the same tab palette and inline annotation style as the other plots.
+    using the same tab palette as the other plots and a per-subplot legend.
     """
     import pathlib as _pathlib
 
@@ -1916,8 +1918,9 @@ def plot_all_subset_limits(species_labels, reaction_labels, nu_reactants, nu_pro
 
     Iterates all combinations of 1..n_rxn reactions plus the no-reaction baseline,
     runs the full mixing-limit analysis for each, and overlays every profile on a
-    per-species subplot grid.  Curves are coloured by subset size; the no-reaction
-    line is dashed grey and the full scheme is bold black.
+    per-species subplot grid.  Each subset gets its own (colour, linestyle, marker)
+    from _build_tab_palette, keyed by subset_num; the no-reaction line is drawn
+    dashed and the full scheme bold, both on top of the other subsets.
 
     ``keep_subsets`` / ``discard_subsets`` select which subsets to plot by their
     integer ``subset_num`` (same numbering as :func:`export_all_subsets_json` and
@@ -2179,9 +2182,10 @@ def plot_ode_trajectories(ode_results, save_stem=None):
     )
     rxn_labels = ref.get('rxn_labels', [])
 
-    # Bimolecular reactions (exactly 2 distinct reactant species) only -- the
+    # Reactions with exactly 2 distinct reactant species only -- the
     # rate/(k*y1*y2)-1 fluctuation-correlation diagnostic below is only
-    # meaningful for a two-species mass-action rate law.
+    # meaningful for a two-species mass-action rate law first order in each
+    # (reaction orders are not checked here).
     _rxn_reactants = ref.get('rxn_reactants', [])
     corr_rxns = []
     if has_rates:
@@ -2587,12 +2591,16 @@ def stream1_reactant_to_product_fraction(species_list, y_initial, y_final, Y1,
     """Fraction of the consumed stream-1 limiting reactant that ended up as product.
 
     Intended to be called at the end of an ODE simulation as a closure check.
-    The limiting reactant is the species fed in stream 1 (Y1 > 0, the f=1 feed)
-    that is in shortest supply relative to its stoichiometric demand.  Its
+    The limiting reactant (unless ``limiting_species`` is given) is chosen by
+    :func:`_stream1_limiting_index`: normally the stream-1 (Y1 > 0, the f=1 feed)
+    reactant in shortest supply relative to its stoichiometric demand, restricted
+    to cross-stream reactants when ``Y2`` is given (falling back to a stream-2
+    reactant if stream 1 feeds only e.g. a catalyst).  Its
     consumed amount over the simulation is ``y_initial - y_final``.
 
-    Each terminal product (a species produced by some reaction but never itself a
-    reactant, e.g. P, R, T, S, Q) is weighted by its *stoichiometric content* of
+    Each product (a species produced by some reaction, including intermediates
+    later consumed again, but excluding L and fed reactants; e.g. P, R, T, S, Q)
+    is weighted by its *stoichiometric content* of
     the limiting reactant: the moles of L embodied per mole of product, derived
     from the reaction network (see :func:`_limiting_reactant_content`).  So if one
     mole of S requires two moles of the limiting reactant A, S contributes
@@ -2628,9 +2636,12 @@ def stream1_reactant_to_product_fraction(species_list, y_initial, y_final, Y1,
         ``stoich_factors`` (name -> moles of L per mole of product),
         ``per_product_equiv`` (name -> moles of L embodied), ``per_product_fraction``
         (name -> share of consumed L; these sum to ``fraction`` and equal unity
-        under perfect mass closure), ``product_in_reactant_equiv`` (numerator, in
-        moles of L), ``fraction``.  ``fraction`` is NaN when no stream-1 reactant
-        is found or nothing was consumed.
+        under perfect mass closure, except that a product with a zero
+        stoichiometric factor is reported relative to L *fed* and is not part of
+        ``fraction``), ``product_in_reactant_equiv`` (numerator, in
+        moles of L), ``fraction``.  ``fraction`` is NaN when no limiting reactant
+        is found, nothing was consumed, some product's L-content is unresolvable
+        (cyclic/reversible network), or there are no products.
     """
     y_initial = np.asarray(y_initial, dtype=float)
     y_final = np.asarray(y_final, dtype=float)
@@ -2817,7 +2828,7 @@ def _stream1_limiting_index(Y1, nu_reactants, Y2=None, nu_products=None):
       * Catalysts and other never-net-consumed species are excluded.  A catalyst is
         regenerated, so its conversion stays 0 and the conversion event would never
         fire (the run would only stop at the steady-state / time-cap backstop).
-      * If stream 1 feeds no consumable cross-stream reactant (e.g. it feeds only a
+      * If stream 1 feeds no consumable reactant at all (e.g. it feeds only a
         catalyst), fall back to the consumable stream-2 reactant of the cross-stream
         reaction, so termination still keys on a species that is actually depleted.
     """
@@ -2942,15 +2953,18 @@ def sweep_epsilon_product_fractions(unique_sp_data, stream_1_feed, stream_2_feed
     weight_methods : str or sequence of str
         Interpolation method(s) to evaluate.
     save_stem : path-like, optional
-        If given, the figure is saved under ``<save_stem>.parent/plots/``.
+        If given, the figure (plus the sweep CSV and the per-species clamp-%
+        figure/CSV) is saved under ``<save_stem>.parent/plots/``.
 
     Returns
     -------
     dict
         ``{weight_method: {'epsilons', 'tau_s', 'integration_times', 'fractions'
-        (species -> array), 'conversion', 'total', 'limiting_reactant'}}`` —
-        where ``integration_times`` are the event-determined end times.  Ready
-        for a later CSV export.  For ``weight_method == 'ray_limit'`` only,
+        (species -> array), 'conversion', 'total', 'limiting_reactant',
+        'total_cpu_s', 'total_clamps', 'sp_clamp_pcts'}}`` — where
+        ``integration_times`` are the event-determined end times.  blend_fs and
+        ray_limit also include ``'fsb_finals'`` (final fs per ε).  For
+        ``weight_method == 'ray_limit'`` only,
         also includes ``'ode_results'`` — the full per-epsilon result dicts,
         for :func:`plot_raylimit_epsilon_sweep_movie`.
     """
@@ -3210,7 +3224,8 @@ def _save_sweep_csv(sweep, weight_methods, all_products, save_stem):
     """Write the plotted ε-sweep points (X_species, X_conv, TOTAL) to a CSV.
 
     One row per ε; columns are epsilon, tau_s, integration_time and, for each
-    weight method, X_<product> for every product plus X_conv and TOTAL.  Column
+    weight method, X_<product> for every product plus X_conv and TOTAL (and
+    fs_final for methods that track it).  Column
     names are suffixed with the method when more than one is swept.
     """
     import csv
@@ -3403,9 +3418,11 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     Weights for the blended C_w_i(f) profile are recomputed every step so
     that the beta-weighted average of C_w_i equals y_i(t).
     The rate of reaction j is then the exact beta-weighted integral of
-    k_j * prod_i C_w_i(f)^nu_ij over [0, 1].
+    k_j * prod_i C_w_i(f)^o_ij over [0, 1], where o_ij is the rate-law order
+    (JSON ``reaction_orders``, else the stoichiometric coefficient for
+    'elementary' reactions, else 1).
 
-    Initial conditions: y_i(0) = (1 - mean_f)*stream_1_feed[i] + mean_f*stream_2_feed[i]
+    Initial conditions: y_i(0) = mean_f*stream_1_feed[i] + (1 - mean_f)*stream_2_feed[i]
     — the unreacted linear mix at the mean mixture fraction.
 
     Integration end time
@@ -3413,8 +3430,11 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     When ``t_end is None`` (the default) the integration time is not prescribed:
     a CVODE terminal *event* stops the solve when the stream-1 limiting reactant
     reaches ``conversion_target`` fractional conversion (default 0.999), so the
-    solver decides the end time from the solution itself.  A generous safety cap
-    (1e4·tau_s) bounds the run if the target is never reached.  Passing an
+    solver decides the end time from the solution itself.  A steady-state
+    backstop (net rate decayed to 1e-6 of its t=0 value, checked only once the
+    mixing variance is below 1% of its start) ends runs that plateau short of
+    the target, and a safety cap (``t_cap_mult``·tau_s, default 1e4) bounds the
+    run otherwise.  Passing an
     explicit ``t_end`` restores fixed-time integration with no event.
 
     ``raylimit_fallback_tol`` / ``raylimit_fallback_conv_ceiling`` (ray_limit
@@ -3507,7 +3527,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
               f"all other reactants enter the rate law at order 1.")
 
     def _get_order(j, i):
-        """Rate-law exponent for species i in reaction j.  Always returns int."""
+        """Rate-law exponent for species i in reaction j.  Returns int when integral, else float."""
         def _int_or_float(v):
             v = float(v)
             return int(v) if v == int(v) else v
@@ -3565,14 +3585,15 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
 
     # ── blend_fs-method precompute ─────────────────────────────────────────
     # blend_fs is the product-weighted blend of the subsets listed in the JSON
-    # config's ``blend_subsets`` key, built with the strict fs rule (single
-    # kink at fs_blend = w_a*fs_a + w_b*fs_b + ...); the rate then interpolates
+    # config's ``blend_subsets`` key: a weighted sum (weights w_k) of each
+    # subset's full own profile, with diagnostic fs_blend from the w-weighted
+    # odds fs/(1-fs) (see _blendfs_weights); the rate then interpolates
     # that blend against the no-reaction limit by the mean.  Weights come from
     # each subset's distinguishing products -- the species it produces that
     # the other blended subsets do not.  Everything that is constant in time
-    # (the subsets, their fs, and each species' values at f=0, f=1 and at
-    # each subset's own fs) is precomputed here.  blend_fs only runs when
-    # >=2 valid subsets are given in blend_subsets.
+    # (the subsets, their fs, and each species' value in each subset at every
+    # point of the union of the subsets' breakpoints) is precomputed here.
+    # blend_fs only runs when >=2 valid subsets are given in blend_subsets.
     is_blendfs = weight_method == 'blend_fs'
     blendfs_ok = False
     if is_blendfs:
@@ -3681,12 +3702,13 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                       f"(found {len(bf_subs)}); method will not run.")
 
     # ── ray_limit-method precompute ───────────────────────────────────────
-    # ray_limit builds ONE complete-reaction limit each step whose reaction
-    # selectivity is taken from the CURRENT reaction rates (mass action at the
-    # current mean composition).  The mixing line M(f) is reacted to completion
-    # along that fixed selectivity direction d: the limiting reactants reach 0 at a
-    # single fs, products peak there, and because C − M = N·(c·d) with c·d ≥ 0 the
-    # limit is stoichiometrically exact by construction.  No subset enumeration is
+    # ray_limit builds ONE complete-reaction limit each step whose selectivity
+    # direction d is the accumulated extent Δ = y − y0 (a mass-action-rate
+    # direction N·r(y) only as a fallback near y0; see _selectivity_ray).  The
+    # mixing line M(f) is reacted to completion along that fixed direction d: the
+    # limiting reactants reach 0 at a single fs, products peak there, and because
+    # B − M = c_max(f)·d with d = N·(accumulated extents) the limit is
+    # stoichiometrically exact by construction.  No subset enumeration is
     # needed — the "blended subset" is whatever the live solution implies.
     is_raylimit = (weight_method == 'ray_limit')
     raylimit_ok = is_raylimit and (n_rxns > 0) and (n_active > 0)
@@ -3874,7 +3896,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     # against the no-reaction line.  Pure cross-stream only: one ray, one kink.
 
     def _massaction_rates(y_active, uniform_k=None):
-        """Instantaneous mass-action reaction rates r_j = k_j·Π yᵢ^{νᵢⱼ}.
+        """Instantaneous mass-action reaction rates r_j = k_j·Π yᵢ^{oᵢⱼ}
+        (oᵢⱼ = rate-law order).
 
         If ``uniform_k`` is given, every reaction uses that value in place of
         its own k_j."""
@@ -4114,7 +4137,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         # Per-profile beta-averages: computed when the selected method's own
         # rate calculation reads them directly, or when the caller explicitly
         # asks for them (need_profiles=True) to record for plotting.  Skipped
-        # otherwise, since callers that don't set need_profiles discard this
+        # otherwise, since callers that pass need_profiles=False discard this
         # return value.
         _uses_profiles_directly = not (is_blendfs or (is_raylimit and raylimit_ok))
         sp_ev = {}
@@ -4336,8 +4359,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     rates_out = np.empty((n_t, n_rxns))
     # Per-limit beta-averages over time: sp -> array (n_t, n_profiles).
     limit_avgs = {sp: np.full((n_t, len(sp_profiles[sp])), np.nan) for sp in sp_profiles}
-    # blend_fs only: the time-varying per-subset blend weights, blended fs, and
-    # the beta-averaged blended limit E[B_i] per species (for the averages plot).
+    # blend_fs only: the time-varying per-subset blend weights and blended fs.
     _bf_diag = (is_blendfs and blendfs_ok)
     _rl_diag = (is_raylimit and raylimit_ok)
     bf_w_t = np.full((n_t, bf_n), np.nan) if _bf_diag else None
@@ -4476,7 +4498,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     #       momentarily loses its reactant overlap — seen with linear_interp when its
     #       active pair of subset limits switches (none from ray_limit or blend_fs
     #       across the inputs/ and examples/ cases), so they are bridged ONLY
-    #       when a rate actually suffers them (≥2 dropout points).  Most problems
+    #       when a rate actually suffers them (at least max(4, ~5% of the output
+    #       steps) dropout points in some rate).  Most problems
     #       have none and keep their native rates exactly.
     # Outliers are flagged against a robust rolling-median trend (its own max sets
     # the rate scale, so the startup spike can't inflate the floor) and replaced by
@@ -4535,8 +4558,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                       f"({100.0*hi/n_t:.0f}%), {lo} below no-reaction "
                       f"({100.0*lo/n_t:.0f}%)")
 
-    # ray_limit clamp summary: the inverse-distance blend is meant to keep the
-    # mean inside the [E[M], E[B]] band, so this should normally report no clamping.
+    # ray_limit clamp summary: the mean-matched λ blend of M and B is meant to keep
+    # the mean inside the [E[M], E[B]] band, so this should normally report no clamping.
     if _rl_diag:
         _clamped = [sp for sp in sp_profiles if rl_clamp_lo[sp] or rl_clamp_hi[sp]]
         if not _clamped:
@@ -4561,7 +4584,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                   f"[lowest-limit, highest-limit] profile-average range ({n_t} steps).")
         else:
             print(f"[{weight_method}]   [clamp] {n_t} output steps; mean outside "
-                  f"[lowest-limit, highest-limit] range by >1e-10 ->")
+                  f"[lowest-limit, highest-limit] range by >{_clamp_atol:.2g} ->")
             for sp in _clamped:
                 lo, hi = li_clamp_lo[sp], li_clamp_hi[sp]
                 print(f"[{weight_method}]     {sp}: {hi} step(s) above highest limit "
@@ -4897,6 +4920,9 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
     Each cell shows coloured horizontal lines at
     the per-profile beta-weighted average, black dashed blended C_w(f), Beta
     PDF on a secondary axis, and coloured weight values in the subplot title.
+    For blend_fs / ray_limit runs each cell instead shows M(f), B(f) and
+    C(f)=B+(M-B)·λ (_draw_blendfs_cell); ray_limit also labels the top row
+    with the current ray d=y-y0.
     """
     import pathlib as _pathlib
 
@@ -4989,8 +5015,9 @@ def plot_ode_beta_snapshots(unique_sp_data, ode_result, save_stem=None, f_xlim=N
                 _draw_blendfs_cell(ax, cell_title, _bf_fgrid, Mi, v0, vfs, v1, fsb, lam,
                                    alpha_t, beta_t, average_val, xlim=f_xlim, B_profile=_bprof)
             elif _rl is not None and sp in _rl['prof']:
-                # ray_limit: draw the FULL staged complete-reaction limit B(f)
-                # (multi-segment for catalytic systems) and C(f)=B+(M-B)·λ.
+                # ray_limit: draw the complete-reaction limit B(f) from limit_bps
+                # (pure feeds: at most one interior kink, at the closed-form fs)
+                # and C(f)=B+(M-B)·λ.
                 v0, vfs, v1, lam = _rl['prof'][sp][t_idx]
                 fsb = float(_rl['fsb'][t_idx])
                 Mi = float(_rl['Y1'][sp_global_idx]) * _bf_fgrid + \
@@ -5060,8 +5087,9 @@ def _draw_blendfs_cell(ax, title, f_grid, Mi, v0, vfs, v1, fsb, lam,
     Beta PDF and the species mean for reference.
 
     By default B(f) is the single-kink limit (v0, vfs, v1, kink at fsb).  Passing
-    ``B_profile=(bps, Bvals_1d)`` instead draws the full piecewise-linear staged
-    limit (used by ray_limit, whose catalytic limit is multi-segment)."""
+    ``B_profile=(bps, Bvals_1d)`` instead draws the full piecewise-linear
+    limit (used by blend_fs, whose blended limit is multi-segment over bf['bp'],
+    and by ray_limit, whose limit_bps carry at most one interior kink)."""
 
     if B_profile is not None:
         _bps, _Bv = B_profile
@@ -5210,7 +5238,7 @@ def _draw_cw_cell(ax, title, profiles, alpha, beta_p, average_val, weight_method
     _n_w = len(weights)
     _wy = 1.04
     ax.text(0.0, _wy, 'w=[', transform=ax.transAxes, fontsize=7, ha='left', va='bottom', clip_on=False)
-    for _i, (_wv, _wc) in enumerate(zip(weights, colors)):
+    for _i, (_wv, _wc) in enumerate(zip(weights, [s[0] for s in styles])):
         _wx = 0.1 + _i * 0.8 / max(_n_w - 1, 1)
         _fw = 'bold' if _wv > 1e-10 else 'normal'
         ax.text(_wx, _wy, f'{_wv:.1f}', transform=ax.transAxes,
@@ -5754,8 +5782,9 @@ def plot_raylimit_limit_grid(ode_result, save_stem=None):
 
     Each subplot overlays B_i(f) for every active species at that time, using the
     SAME species→colour mapping, stream-split (stream-1 species on a twin axis),
-    and `/20` scaling of a dominant species as the subset grid, so the two read
-    alike.  The four times match the beta snapshots (first near 1/96 of t_end)."""
+    and per-stream outlier scaling (a dominant species divided down to ~1000)
+    as the subset grid, so the two read alike.  The four times match the beta
+    snapshots (first near 1/96 of t_end)."""
     import pathlib as _pathlib
 
     rl = ode_result.get('raylimit')
@@ -5899,8 +5928,9 @@ def _raylimit_beta_weight_grid(ode_result, t, f_grid):
     difference over each f cell, divided by cell width) rather than the raw
     pointwise Beta density: at the segregated (t=0) and near-fully-mixed
     (t=t_end) limits the shape parameters alpha, beta -> 0 or -> large, and
-    the pointwise density diverges at f=0/1, while the binned mass stays
-    finite everywhere (it's what the model actually integrates against)."""
+    the pointwise density diverges at f=0/1 (segregated) or spikes sharply at
+    mean_f (mixed), while the binned mass stays finite everywhere (it's what the
+    model actually integrates against)."""
     mean_f = ode_result['mean_f']
     m_epsilon = ode_result.get('m_epsilon', DEFAULT_M_EPSILON)
     m_lambda = ode_result.get('m_lambda', DEFAULT_M_LAMBDA)
@@ -5933,7 +5963,9 @@ def plot_raylimit_Cf_heatmap(ode_result, save_stem=None):
     species fed by stream 1 scales to the highest stream-1 feed
     concentration; a species fed by stream 2, or fed by neither stream
     (a pure reaction product), scales to the highest stream-2 feed
-    concentration.
+    concentration -- in both cases excluding any feed outlier, which is
+    instead divided down to ~1000 and scaled to its own feed
+    (see :func:`_heatmap_vmax_divisors`).
 
     Red solid contours trace the 0.001/0.01/0.1/0.5/0.9-of-max levels of the
     local mixture-fraction density Beta(f;t) at each time (normalised per
@@ -6412,7 +6444,8 @@ def plot_raylimit_ray_parcoords_movie(ode_result, save_stem=None, fps=8, n_frame
     fs* and the intensity of segregation I_s.  Frames are the output steps
     nearest ``n_frames`` evenly spaced conversions of the stream-1 limiting
     reactant (evenly spaced times if there is none), preceded by the ray at the
-    first output step; every axis is scaled to its own min–max over all frames."""
+    first output step; the ray components share a fixed [−1, 1] axis, and the
+    t, fs* and I_s axes are each scaled to their own min–max over all frames."""
     import pathlib as _pathlib
     import matplotlib.animation as animation
     from matplotlib.colors import Normalize
@@ -6665,10 +6698,11 @@ def plot_raylimit_epsilon_sweep_movie(ode_results, save_stem=None, fps=2):
 
 
 def _species_limits_grid_axes(unique_sp_data, include_cf=True):
-    """Shared setup for the two ray_limit "species_limits" movies: the same
+    """Shared setup for the two ray_limit "species_limits" movies and the
+    static snapshot (:func:`plot_raylimit_species_limits_static`): the same
     per-species subplot grid and static per-subset profile lines as
     :func:`plot_unique_species_profiles`, plus one extra (initially empty)
-    bold line and one dashed vertical line per subplot for the animated
+    bold line and one dotted vertical line per subplot for the animated
     ray_limit B(f) and its fs kink.  When ``include_cf`` is True, also adds a
     colour-blind-safe red line for the interpolated C(f) (only meaningful
     when C(f) still visibly differs from B(f) frame to frame, e.g. the
@@ -6768,8 +6802,8 @@ def plot_raylimit_species_limits_movie(unique_sp_data, ode_result, save_stem=Non
     """Animate ray_limit's B(f) for each species over time, overlaid on that
     species' static per-subset profile grid -- the same layout as
     :func:`plot_unique_species_profiles` (the "species_limits" plot), so the
-    live ray_limit limit can be compared directly against the LP-derived
-    subset references it interpolates between."""
+    live ray_limit B(f) (and, in red, the interpolated C(f)) can be compared
+    directly against the LP-derived subset references."""
     import pathlib as _pathlib
     import matplotlib.animation as animation
 
@@ -7003,7 +7037,8 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
     (e.g. the near-f=0 step where a catalyst confined to one stream first
     becomes present) is preserved rather than smeared into a long diagonal.
     Uses the SAME species→colour mapping, stream-split (stream-1 species on a twin
-    axis) and `/20` scaling as the ray_limit grid, so the two read alike.  The four
+    axis) and same-stream outlier scaling (dominant species divided down to
+    ~1000) as the ray_limit grid, so the two read alike.  The four
     times match the beta snapshots (first near 1/96 of t_end)."""
     import pathlib as _pathlib
 
@@ -7097,7 +7132,7 @@ def plot_blendfs_limit_grid(ode_result, save_stem=None, blend_subsets=None):
     _bs_note = f'  blend_subsets={list(blend_subsets)}' if blend_subsets is not None else ''
     fig.suptitle('blend_fs blended complete-reaction limit B(f) by snapshot time  '
                  f'(mean_f={mean_f:.4f},  ε={m_epsilon:.4g}{_bs_note})\n'
-                 'solid = control-point approx  ·  grey ·· = individual subset kinks  ·  black ·· = fsb',
+                 'solid = blended limit B(f)  ·  grey ·· = individual subset kinks  ·  black ·· = fsb',
                  fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
@@ -7222,7 +7257,7 @@ def plot_cprofile_per_reaction(unique_sp_data, ode_result, save_stem=None):
                     fsb = 0.5
 
             reactant_Cf_pdf = {}  # sp_pos -> (Cf_on_f_pdf, rate_order)
-            cf_max = None   # overall max C(f) in this subplot, for the log y-axis
+            cf_max = None   # overall max C(f) in this subplot, for the (linear) y-axis upper limit
             for sp_pos in reactant_pos:
                 sp = active_species[sp_pos]
                 sp_global = int(active_indices[sp_pos])
@@ -7438,7 +7473,7 @@ def plot_cprofile_reactant_product_per_reaction(unique_sp_data, ode_result, save
                     fsb = 0.5
 
             reactant_Cf_pdf = {}  # sp_pos -> (Cf_on_f_pdf, rate_order)
-            cf_max = None   # overall max C(f) in this subplot, for the log y-axis
+            cf_max = None   # overall max C(f) in this subplot, for the (linear) y-axis upper limit
             for sp_pos in reactant_pos:
                 sp = active_species[sp_pos]
                 sp_global = int(active_indices[sp_pos])
@@ -7669,8 +7704,7 @@ def plot_raylimit_reaction_extents(unique_sp_data, ode_result, save_stem=None):
 
 def plot_beta_pdf_heatmap(ode_result, save_stem=None):
     """Heatmap of the mixture-fraction β-PDF versus f (x) and time (y) over
-    the run's full time history, viewed from above -- the top-down
-    counterpart of the old 3D surface.  Uses the same binned-mass
+    the run's full time history, viewed from above.  Uses the same binned-mass
     computation, viridis colormap, and log colour scale as the ray_limit
     C(f)/B(f) heatmaps (:func:`_raylimit_beta_weight_grid`), so the three
     read alike; the PDF depends only on mean_f and the
@@ -7983,9 +8017,11 @@ if __name__ == '__main__':
 
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     run_sweep = '--sweep' in sys.argv  # ε sweep is off by default
-    make_movie = '--movie' in sys.argv  # ray_limit B(f) movies are off by default
+    # movies (ray_limit B(f)/species-limits/ray parcoords, f blob pattern, ε-sweep) are off by default
+    make_movie = '--movie' in sys.argv
     _SAVE_PDF = '--pdf' in sys.argv  # also save each figure as a vector PDF
-    heatmaps_only = '--heatmaps-only' in sys.argv  # skip every plot except the Cf/Bf heatmaps (and their movies)
+    # skip every plot except the Cf/Bf and β-PDF heatmaps and f blob patterns (and their movies)
+    heatmaps_only = '--heatmaps-only' in sys.argv
 
     config_path = pathlib.Path(args[0]) if args else pathlib.Path(__file__).parent / 'inputs' / 'input_example.json'
     # Outputs go next to the inputs/ folder, not inside it.
@@ -8225,7 +8261,7 @@ if __name__ == '__main__':
             unique_sp_data, Stream_1_Feed, Stream_2_Feed,
             epsilons=np.geomspace(1.0e-6, 1.0e6, 51),
             rate_constants=rate_constants, mean_f=BETA_MEAN_F,
-            weight_methods=RUN_METHODS,
+            weight_methods=RUN_METHODS, conversion_target=CONVERSION_TARGET,
             save_stem=save_stem, blend_subsets=_cfg.get('blend_subsets'),
             ode_rtol=_cfg.get('rtol'), ode_atol=_cfg.get('atol'),
             reaction_orders=_cfg.get('orders'),
