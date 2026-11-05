@@ -3415,8 +3415,7 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     reaches ``conversion_target`` fractional conversion (default 0.999), so the
     solver decides the end time from the solution itself.  A generous safety cap
     (1e4·tau_s) bounds the run if the target is never reached.  Passing an
-    explicit ``t_end`` restores fixed-time integration with no event (used by the
-    ε sweep, which gives every run the same mixing-time budget).
+    explicit ``t_end`` restores fixed-time integration with no event.
 
     ``raylimit_fallback_tol`` / ``raylimit_fallback_conv_ceiling`` (ray_limit
     only): ``_selectivity_ray`` uses the mass-action-rate fallback
@@ -3902,7 +3901,11 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
         regardless of the system's absolute concentration scale."""
         nonlocal _fallback_switch_reported
         delta = y_active - y0
-        conv_frac = (float(np.max(np.abs(delta[_rl_fed_mask]) / _rl_feed_scale[_rl_fed_mask]))
+        # Unfed species (intermediates/products) start at y0 = 0, so they can't be
+        # net-consumed; a negative Δ there is solver undershoot and would otherwise
+        # be misread as a reactant fed by neither stream (limit refused, rates 0).
+        delta = np.where(_rl_fed_mask, delta, np.maximum(delta, 0.0))
+        conv_frac =(float(np.max(np.abs(delta[_rl_fed_mask]) / _rl_feed_scale[_rl_fed_mask]))
                      if _rl_fed_mask.any() else 0.0)
         if (float(np.sum(np.abs(delta))) > raylimit_fallback_tol
                 or conv_frac > raylimit_fallback_conv_ceiling):
@@ -4186,8 +4189,8 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
                 yp[ai] = 0.0
 
     # ── Integration end time ──────────────────────────────────────────────
-    # With t_end given, integrate over a fixed window (the ε sweep relies on
-    # this).  Otherwise let CVODE terminate on a conversion event: the solve
+    # With t_end given, integrate over a fixed window (no conversion event).
+    # Otherwise let CVODE terminate on a conversion event: the solve
     # stops when the stream-1 limiting reactant hits `conversion_target`.
     L_event = _stream1_limiting_index(Y1, nu_reactants, Y2, nu_products)
     use_event = t_end is None and L_event is not None
@@ -4469,9 +4472,10 @@ def integrate_species_odes(unique_sp_data, stream_1_feed, stream_2_feed,
     # outliers can mar the rate plot that the smooth integrated curves don't show:
     #   (a) a t≈0 burst of a fast reaction (a one-point spike that dominates the
     #       plot scale) — common, so it is ALWAYS removed when present; and
-    #   (b) short DROPOUTS to ~0 later in the run where ray_limit's state-rebuilt
-    #       limit momentarily loses its reactant overlap — these are specific to
-    #       problems that exercise the non-smooth limit, so they are bridged ONLY
+    #   (b) short DROPOUTS to ~0 later in the run where the interpolated limit
+    #       momentarily loses its reactant overlap — seen with linear_interp when its
+    #       active pair of subset limits switches (none from ray_limit or blend_fs
+    #       across the inputs/ and examples/ cases), so they are bridged ONLY
     #       when a rate actually suffers them (≥2 dropout points).  Most problems
     #       have none and keep their native rates exactly.
     # Outliers are flagged against a robust rolling-median trend (its own max sets

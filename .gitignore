@@ -19,6 +19,7 @@ logs/
 run_logs/
 lines/
 species/
+parametric/
 *.csv
 
 # Working input configs (a curated examples/ folder will replace this)
